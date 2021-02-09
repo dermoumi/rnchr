@@ -1,0 +1,22 @@
+{
+    "name": "rnchr",
+    "version": "0.0.1",
+    "description": "bash library for rancher 1.6",
+    "scripts": [
+      "dist/rnchr"
+    ],
+    "files": [
+      "src/main.sh",
+      "lib/rnchr/api.sh",
+      "lib/rnchr/container.sh",
+      "lib/rnchr/env.sh",
+      "lib/rnchr/secret.sh",
+      "lib/rnchr/service.sh",
+      "lib/rnchr/stack.sh",
+      "lib/rnchr/_utils.sh"
+    ],
+    "dependencies": {
+      "dermoumi/butl": "master",
+      "dermoumi/barg": "master"
+    }
+}

@@ -1,0 +1,2521 @@
+#!/usr/bin/env bash
+
+# BGEN__SHEBANG_REMOVED
+
+set -o errexit -o errtrace -o pipefail -o nounset
+
+LOG_LEVEL="${LOG_LEVEL:-6}" # 7 = debug -> 0 = emergency
+NO_COLOR="${NO_COLOR:-}"
+
+
+# BGEN__SHEBANG_REMOVED
+
+# BGEN__BEGIN /home/sdrm/projects/barg/lib/barg.sh
+# BGEN__SHEBANG_REMOVED
+
+# BGEN__BEGIN /home/sdrm/projects/butl/lib/butl/vars.sh
+# BGEN__SHEBANG_REMOVED
+
+# Check if the passed variable(s) is declared
+# @param variable_name:  Name of variable to check
+butl.is_declared() {
+    [[ "$(declare -p "$1" 2>/dev/null)" =~ ^"declare -a " ]] || eval "[[ \${$*+x} ]]"
+}
+
+# Sets an array by name
+# @param variable_name:  Name of the variable
+# @param value:  Value of the variable
+butl.set_var() {
+    # shellcheck disable=SC2059
+    printf -v "$1" -- "$2"
+}
+
+# Check if value is false
+butl.is_false() {
+    if ((BASH_VERSINFO[0] < 4)); then
+        local value
+        value=$(tr '[:upper:]' '[:lower:]' <<<"$1")
+    else
+        local value=${1,,}
+    fi
+
+    [[ "$value" =~ ^(0|f|n|false|off|no)?$ ]]
+}
+
+# Check if value is true
+butl.is_true() {
+    ! butl.is_false "$@"
+}
+# BGEN__END /home/sdrm/projects/butl/lib/butl/vars.sh
+# BGEN__BEGIN /home/sdrm/projects/butl/lib/butl/arrays.sh
+# BGEN__SHEBANG_REMOVED
+
+# Checks if a variable is declared and is an array
+# @param  array_name:  Array to check
+butl.is_array() {
+    [[ "$(declare -p "$1" 2>/dev/null)" =~ ^"declare -a " ]]
+}
+
+# Sets an a array by name
+# @param  array_name:  Name of the array
+# @param  args...:  Values of the array
+butl.set_array() {
+    local array_name=$1
+    shift
+
+    if (($#)); then
+        eval "$array_name=($(printf '%q ' "$@"))"
+    else
+        eval "$array_name=()"
+    fi
+}
+
+# Copies an array to another by name
+# @param source:  Array to copy from
+# @param target:  Array to copy to
+# @returns 1 if source
+butl.copy_array() {
+    if ! butl.is_array "$1"; then
+        return 1
+    elif eval "((\${#${1}[@]} == 0))"; then
+        butl.set_array "$2"
+    else
+        eval "$2=( \"\${""$1""[@]}\" )"
+    fi
+}
+
+# Copies an associative array to another by name
+# @param source:  Array to copy from
+# @param target:  Array to copy to
+butl.copy_associative_array() {
+    local declare_statement
+    declare_statement=$(declare -p "$1" 2>/dev/null)
+
+    if ! [[ "$declare_statement" =~ ^"declare -a " ]]; then
+        return 1
+    elif eval "((\${#${1}[@]} == 0))"; then
+        eval "$2=()"
+    else
+        if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
+            # workaround bash <4.4 quoting the content of the variables in declare's output
+            local __butl_affect_target="'$2=" # will fail if $1 == "__butl_affect_target", but what are the odds
+
+            # also these versions concat array elements instead of replacing them
+            # so we unset existing values before setting new ones
+            eval "$(eval "echo ${declare_statement/declare -a $1=\'/$__butl_affect_target}")"
+        else
+            eval "${declare_statement/declare -a $1=/$2=}"
+        fi
+    fi
+}
+
+# Finds the index of an element amongs others
+# @param target:       Element to find
+# @param args...:      Items to search through
+# @sets  array_index:  Index of the item in the array
+# @returns  0 if the item is found, 1 if not
+butl.index_of() {
+    local target=$1
+    shift
+
+    local i=0
+    while (($#)); do
+        if [[ "$1" == "$target" ]]; then
+            if declare -p array_index >/dev/null 2>/dev/null; then
+                array_index=$i
+            fi
+
+            return 0
+        fi
+
+        i=$((i + 1))
+        shift
+    done
+
+    return 1
+}
+
+# Joins arguments by a custom delimiter
+# @param delimiter:  Which delimiter to use
+# @param args...:  Items to join
+butl.join_by() {
+    local delimiter=$1
+    if (($# <= 1)); then
+        return 0
+    fi
+
+    local first=$2
+    shift 2
+
+    printf %s "$first" "${@/#/$delimiter}"
+}
+
+# Splits a multiline string into an array
+# @param array_name:  Array to copy to
+# @param args...?: Items to parse. Falls back to stdin if no arguments are found
+butl.split_lines() {
+    local array_name=$1
+    shift
+
+    local lines=()
+
+    if (($#)); then
+        local original_IFS=$IFS
+        IFS=$'\n'
+
+        # shellcheck disable=SC2068
+        for line in $@; do
+            lines+=("$line")
+        done
+
+        IFS=$original_IFS
+    else
+        while read -r line; do
+            lines+=("$line")
+        done
+    fi
+
+    butl.copy_array lines "$array_name"
+}
+# BGEN__END /home/sdrm/projects/butl/lib/butl/arrays.sh
+# BGEN__BEGIN /home/sdrm/projects/butl/lib/butl/ansi.sh
+# BGEN__SHEBANG_REMOVED
+
+__butl.init_ansi_vars() {
+    # Colors o/
+    if ((${NO_COLOR:-})); then
+        export BUTL_ANSI_RESET=
+
+        export BUTL_ANSI_BOLD=
+        export BUTL_ANSI_DIM=
+        export BUTL_ANSI_UNDERLINE=
+        export BUTL_ANSI_BLINK=
+        export BUTL_ANSI_INVERT=
+        export BUTL_ANSI_HIDDEN=
+
+        export BUTL_ANSI_RESET_BOLD=
+        export BUTL_ANSI_RESET_DIM=
+        export BUTL_ANSI_RESET_UNDERLINE=
+        export BUTL_ANSI_RESET_BLINK=
+        export BUTL_ANSI_RESET_INVERT=
+        export BUTL_ANSI_RESET_HIDDEN=
+
+        export BUTL_ANSI_DEFAULT=
+
+        export BUTL_ANSI_BLACK=
+        export BUTL_ANSI_RED=
+        export BUTL_ANSI_GREEN=
+        export BUTL_ANSI_YELLOW=
+        export BUTL_ANSI_BLUE=
+        export BUTL_ANSI_MAGENTA=
+        export BUTL_ANSI_CYAN=
+        export BUTL_ANSI_WHITE=
+
+        export BUTL_ANSI_BRBLACK=
+        export BUTL_ANSI_BRRED=
+        export BUTL_ANSI_BRGREEN=
+        export BUTL_ANSI_BRYELLOW=
+        export BUTL_ANSI_BRBLUE=
+        export BUTL_ANSI_BRMAGENTA=
+        export BUTL_ANSI_BRCYAN=
+        export BUTL_ANSI_BRWHITE=
+
+        export BUTL_ANSI_BG_DEFAULT=
+
+        export BUTL_ANSI_BG_BLACK=
+        export BUTL_ANSI_BG_RED=
+        export BUTL_ANSI_BG_GREEN=
+        export BUTL_ANSI_BG_YELLOW=
+        export BUTL_ANSI_BG_BLUE=
+        export BUTL_ANSI_BG_MAGENTA=
+        export BUTL_ANSI_BG_CYAN=
+        export BUTL_ANSI_BG_WHITE=
+
+        export BUTL_ANSI_BG_BRBLACK=
+        export BUTL_ANSI_BG_BRRED=
+        export BUTL_ANSI_BG_BRGREEN=
+        export BUTL_ANSI_BG_BRYELLOW=
+        export BUTL_ANSI_BG_BRBLUE=
+        export BUTL_ANSI_BG_BRMAGENTA=
+        export BUTL_ANSI_BG_BRCYAN=
+        export BUTL_ANSI_BG_BRWHITE=
+    else
+        export BUTL_ANSI_RESET="\e[0m"
+
+        export BUTL_ANSI_BOLD="\e[1m"
+        export BUTL_ANSI_DIM="\e[2m"
+        export BUTL_ANSI_UNDERLINE="\e[4m"
+        export BUTL_ANSI_BLINK="\e[5m"
+        export BUTL_ANSI_INVERT="\e[7m"
+        export BUTL_ANSI_HIDDEN="\e[8m"
+
+        export BUTL_ANSI_RESET_BOLD="\e[21m"
+        export BUTL_ANSI_RESET_DIM="\e[22m"
+        export BUTL_ANSI_RESET_UNDERLINE="\e[24m"
+        export BUTL_ANSI_RESET_BLINK="\e[25m"
+        export BUTL_ANSI_RESET_INVERT="\e[27m"
+        export BUTL_ANSI_RESET_HIDDEN="\e[28m"
+
+        export BUTL_ANSI_DEFAULT="\e[39m"
+
+        export BUTL_ANSI_BLACK="\e[30m"
+        export BUTL_ANSI_RED="\e[31m"
+        export BUTL_ANSI_GREEN="\e[32m"
+        export BUTL_ANSI_YELLOW="\e[33m"
+        export BUTL_ANSI_BLUE="\e[34m"
+        export BUTL_ANSI_MAGENTA="\e[35m"
+        export BUTL_ANSI_CYAN="\e[36m"
+        export BUTL_ANSI_WHITE="\e[37m"
+
+        export BUTL_ANSI_BRBLACK="\e[90m"
+        export BUTL_ANSI_BRRED="\e[91m"
+        export BUTL_ANSI_BRGREEN="\e[92m"
+        export BUTL_ANSI_BRYELLOW="\e[93m"
+        export BUTL_ANSI_BRBLUE="\e[94m"
+        export BUTL_ANSI_BRMAGENTA="\e[95m"
+        export BUTL_ANSI_BRCYAN="\e[96m"
+        export BUTL_ANSI_BRWHITE="\e[97m"
+
+        export BUTL_ANSI_BG_BLACK="\e[40m"
+        export BUTL_ANSI_BG_RED="\e[41m"
+        export BUTL_ANSI_BG_GREEN="\e[42m"
+        export BUTL_ANSI_BG_YELLOW="\e[43m"
+        export BUTL_ANSI_BG_BLUE="\e[44m"
+        export BUTL_ANSI_BG_MAGENTA="\e[45m"
+        export BUTL_ANSI_BG_CYAN="\e[46m"
+        export BUTL_ANSI_BG_WHITE="\e[47m"
+
+        export BUTL_ANSI_BG_BRBLACK="\e[100m"
+        export BUTL_ANSI_BG_BRRED="\e[101m"
+        export BUTL_ANSI_BG_BRGREEN="\e[102m"
+        export BUTL_ANSI_BG_BRYELLOW="\e[103m"
+        export BUTL_ANSI_BG_BRBLUE="\e[104m"
+        export BUTL_ANSI_BG_BRMAGENTA="\e[105m"
+        export BUTL_ANSI_BG_BRCYAN="\e[106m"
+        export BUTL_ANSI_BG_BRWHITE="\e[107m"
+    fi
+}
+__butl.init_ansi_vars
+# BGEN__END /home/sdrm/projects/butl/lib/butl/ansi.sh
+# BGEN__BEGIN /home/sdrm/projects/butl/lib/butl/log.sh
+# BGEN__SHEBANG_REMOVED
+
+# BGEN__ALREADY_IMPORTED /home/sdrm/projects/butl/lib/butl/ansi.sh
+
+__butl.init_log_vars() {
+    : "${BUTL_STYLE_EMERGENCY:="${BUTL_ANSI_BOLD}${BUTL_ANSI_BG_RED}${BUTL_ANSI_BRWHITE}"}"
+    : "${BUTL_STYLE_ALERT:="${BUTL_ANSI_BOLD}${BUTL_ANSI_BG_RED}${BUTL_ANSI_BLACK}"}"
+    : "${BUTL_STYLE_CRITICAL:="${BUTL_ANSI_BOLD}${BUTL_ANSI_RED}"}"
+    : "${BUTL_STYLE_ERROR:="${BUTL_ANSI_RED}"}"
+    : "${BUTL_STYLE_PRIMARY:="${BUTL_ANSI_BOLD}${BUTL_ANSI_BRCYAN}"}"
+    : "${BUTL_STYLE_WARNING:="${BUTL_ANSI_YELLOW}"}"
+    : "${BUTL_STYLE_SECONDARY:="${BUTL_ANSI_BOLD}${BUTL_ANSI_BRYELLOW}"}"
+    : "${BUTL_STYLE_NOTICE:="${BUTL_ANSI_GREEN}"}"
+    : "${BUTL_STYLE_INFO:="${BUTL_ANSI_DEFAULT}"}"
+    : "${BUTL_STYLE_DEBUG:="${BUTL_ANSI_BRBLACK}"}"
+
+    if [[ ! "${LOG_LEVEL:-}" ]]; then
+        if [[ "${LOGLEVEL:-}" ]]; then
+            export LOG_LEVEL=$LOGLEVEL
+        elif ((${VERBOSE:-})); then
+            export LOG_LEVEL=7
+        else
+            export LOG_LEVEL=6
+        fi
+    fi
+}
+__butl.init_log_vars
+
+# Prints stylized text
+# @param style:  Style to use
+# @param message...:  Text to echo
+butl.echo_stylized() {
+    local style=$1
+    shift
+    printf -- '%b\n' "${style}${*//\\e\[0m/$BUTL_ANSI_RESET$style}${BUTL_ANSI_RESET}"
+}
+
+# Prints emergency message
+# @param message....: Message to print
+butl.log_emergency() {
+    butl.echo_stylized "$BUTL_STYLE_EMERGENCY" "$@" >&2
+}
+
+# Prints alert message when LOG_LEVEL >= 1
+# @param message....: Message to print
+butl.log_alert() {
+    if ((LOG_LEVEL >= 1)); then
+        butl.echo_stylized "$BUTL_STYLE_ALERT" "$@" >&2
+    fi
+}
+
+# Prints critical message when LOG_LEVEL >= 2
+# @param message....: Message to print
+butl.log_critical() {
+    if ((LOG_LEVEL >= 2)); then
+        butl.echo_stylized "$BUTL_STYLE_CRITICAL" "$@" >&2
+    fi
+}
+
+# Prints error message when LOG_LEVEL >= 3
+# @param message....: Message to print
+butl.log_error() {
+    if ((LOG_LEVEL >= 3)); then
+        butl.echo_stylized "$BUTL_STYLE_ERROR" "$@" >&2
+    fi
+}
+
+# Prints primary message when LOG_LEVEL >= 4
+# @param message....: Message to print
+butl.log_primary() {
+    if ((LOG_LEVEL >= 4)); then
+        butl.echo_stylized "$BUTL_STYLE_PRIMARY" "$@" >&2
+    fi
+}
+
+# Prints warning message when LOG_LEVEL >= 4
+# @param message....: Message to print
+butl.log_warning() {
+    if ((LOG_LEVEL >= 4)); then
+        butl.echo_stylized "$BUTL_STYLE_WARNING" "$@" >&2
+    fi
+}
+
+# Prints secondary message when LOG_LEVEL >= 5
+# @param message....: Message to print
+butl.log_secondary() {
+    if ((LOG_LEVEL >= 5)); then
+        butl.echo_stylized "$BUTL_STYLE_SECONDARY" "$@" >&2
+    fi
+}
+
+# Prints notice message when LOG_LEVEL >= 5
+# @param message....: Message to print
+butl.log_notice() {
+    if ((LOG_LEVEL >= 5)); then
+        butl.echo_stylized "$BUTL_STYLE_NOTICE" "$@" >&2
+    fi
+}
+
+# Prints info message when LOG_LEVEL >= j6
+# @param message....: Message to print
+butl.log_info() {
+    if ((LOG_LEVEL >= 6)); then
+        butl.echo_stylized "$BUTL_STYLE_INFO" "$@" >&2
+    fi
+}
+
+# Prints debug message when LOG_LEVEL >= 7 (or if VERBOSE is set)
+# @param message....: Message to print
+butl.log_debug() {
+    if ((LOG_LEVEL >= 7)); then
+        butl.echo_stylized "$BUTL_STYLE_DEBUG" "$@" >&2
+    fi
+}
+
+# Prints an error and returns and exit code
+# @param message:  Message text
+# @param exit_code?:  Code to return, defaults to 1
+butl.fail() {
+    butl.log_error "$1"
+    return "${2:-1}"
+}
+
+# Prints a critical message and exits program with an exist code
+# @param message:  Message text
+# @param exit_code?:  Code to return, defaults to 1
+butl.die() {
+    butl.log_critical "$1"
+    exit "${2:-1}"
+}
+# BGEN__END /home/sdrm/projects/butl/lib/butl/log.sh
+
+# BGEN__BEGIN /home/sdrm/projects/barg/lib/parse.sh
+# BGEN__SHEBANG_REMOVED
+
+# Parses arguments looking for a subcommand
+# @param        args...         the arguments to parse
+# @required_var subcommand      will be set to the called subcommand
+# @required_var subcommand_args will be set to an array of the args that came after the subcommand
+# @optional_var global_args     will be set to an array of the args that came before the subcommand
+barg.parse() {
+    # add the help subcommand if there are other subcommands
+    if ! ((${__barg_disable_help:-})); then
+        if butl.is_array __barg_subcommands && (("${#__barg_subcommands[@]}")); then
+            barg.subcommand help barg.print_usage \
+                "Prints this message or the help of the given subcommand"
+        fi
+
+        if ! butl.is_declared barg_help; then
+            local barg_help=
+        fi
+
+        if __barg_has_flags; then
+            barg.arg barg_help --short=h --long=help --desc "Prints help information"
+        else
+            barg.arg barg_help --short=h --long=help --desc "Prints help information" --hidden
+        fi
+    fi
+
+    butl.is_array __barg_subcommands || __barg_subcommands=()
+    butl.is_array __barg_options || __barg_options=()
+    butl.is_array __barg_flags || __barg_flags=()
+    # shellcheck disable=SC2034 # TODO: Implement arg parsing
+    butl.is_array __barg_args || __barg_args=()
+
+    local catchall_array=()
+    local process_args_only=0
+    local next_arg_index=0
+
+    # Variable to track whether or not the checks were failed
+    local failed=0
+
+    # Reset set flags for options
+    for option in "${__barg_options[@]-}"; do
+        if [[ ! "$option" ]]; then
+            continue
+        fi
+
+        butl.set_var "__barg_option_${option}_set" 0
+    done
+
+    # Reset filled flags for normal arguments
+    for arg in "${__barg_args[@]-}"; do
+        if [[ ! "$arg" ]]; then
+            continue
+        fi
+
+        butl.set_var "__barg_arg_${arg}_filled" 0
+    done
+
+    # Parse the rest of the arguments
+    while (($#)); do
+        local arg="$1"
+        shift
+
+        local processed_arg=
+        if ! ((process_args_only)); then
+            if [[ "$arg" == "--" ]]; then
+                process_args_only=1
+                continue
+            fi
+
+            # Check if there's a subcommand
+            if [[ "$arg" && " ${__barg_subcommands[*]-} " == *" $arg "* ]]; then
+                local var_subcommand_func="__barg_subcommand_${arg//[-]/_}_func"
+
+                if ! butl.is_declared subcommand; then
+                    local subcommand=
+                fi
+
+                if ! butl.is_declared subcommand_args; then
+                    local subcommand_args=()
+                fi
+
+                if (($#)); then
+                    subcommand="${!var_subcommand_func}"
+                    subcommand_args=("$@")
+                else
+                    subcommand="${!var_subcommand_func}"
+                    subcommand_args=()
+                fi
+
+                # run help command in this context to access other barg variables
+                if [[ "$arg" == "help" ]]; then
+                    "$subcommand" "${subcommand_args[@]}"
+
+                    if butl.is_declared should_exit; then
+                        butl.set_var should_exit 1
+                        return 0
+                    else
+                        exit 0
+                    fi
+                fi
+
+                __barg_postprocess_options
+                __barg_postprocess_flags
+                __barg_postprocess_args
+                barg.reset
+
+                return 0
+            fi
+
+            # Check options
+            for option in "${__barg_options[@]-}"; do
+                local shift_count=0
+
+                if [[ "$arg" == --* ]]; then
+                    local var_option_long="__barg_option_${option}_long"
+                    local option_long="${!var_option_long:-}"
+                    if [[ ! "$option_long" ]]; then
+                        continue
+                    fi
+
+                    if [[ "$arg" == --"$option_long" ]]; then
+                        local option_arg="--$option_long"
+                        __barg_parse_option "$@"
+                        shift "$shift_count"
+                    elif [[ "$arg" == --"$option_long"=* ]]; then
+                        local param=${arg#--"$option_long"=}
+                        local option_arg="--$option_long=$param"
+                        __barg_parse_option "$param"
+                    fi
+                elif [[ "$arg" == -* ]]; then
+                    local var_option_short="__barg_option_${option}_short"
+                    local option_short="${!var_option_short:-}"
+                    if [[ ! "$option_short" ]]; then
+                        continue
+                    fi
+
+                    if [[ "$arg" == -*"$option_short" ]]; then
+                        local option_arg="-$option_short"
+                        __barg_parse_option "$@"
+                        shift "$shift_count"
+                    elif [[ "$arg" == -*"$option_short"=* ]]; then
+                        local param=${arg#-*"$option_short"=}
+                        local option_arg="-$option_short=$param"
+                        __barg_parse_option "$param"
+                    fi
+                fi
+
+                if ((processed_arg)); then
+                    break
+                fi
+            done
+
+            if ((processed_arg)); then
+                continue
+            fi
+
+            # Check flags
+            for flag in "${__barg_flags[@]-}"; do
+                if [[ "$arg" == --* ]]; then
+                    local var_flag_long="__barg_flag_${flag}_long"
+                    local flag_long="${!var_flag_long:-}"
+                    if [[ ! "$flag_long" ]]; then
+                        continue
+                    fi
+
+                    if [[ "$arg" == "--$flag_long" ]]; then
+                        local flag_arg="--$flag_long"
+                        __barg_parse_flag
+                    fi
+                elif [[ "$arg" == -* ]]; then
+                    local var_flag_short="__barg_flag_${flag}_short"
+                    local flag_short="${!var_flag_short:-}"
+                    if [[ ! "$flag_short" ]]; then
+                        continue
+                    fi
+
+                    if [[ "$arg" == -*"$flag_short"* ]]; then
+                        local flag_arg="-$flag_short"
+                        __barg_parse_flag
+                    fi
+                fi
+
+                if ((processed_arg)); then
+                    break
+                fi
+            done
+
+            if ((processed_arg)); then
+                continue
+            fi
+        fi
+
+        if ((next_arg_index < ${#__barg_args[@]})); then
+            local arg_name="${__barg_args[$next_arg_index]}"
+            if [[ "${__barg_catchall_arg:-}" == "$arg_name" ]]; then
+                next_arg_index=$((next_arg_index + 1))
+            fi
+        fi
+
+        if ((next_arg_index < ${#__barg_args[@]})); then
+            local arg_name=${__barg_args[$next_arg_index]}
+
+            local process_arg=1
+            if [[ "$arg" == -* ]]; then
+                local var_arg_allow_dash="__barg_arg_${arg_name}_allow_dash"
+                local arg_allow_dash=${!var_arg_allow_dash:-}
+
+                if ! ((arg_allow_dash)); then
+                    process_arg=0
+                fi
+            fi
+
+            if ((process_arg)); then
+                local arg_values=()
+                butl.copy_array "__barg_arg_${arg_name}_values" arg_values
+
+                if ((${#arg_values[@]} <= 1)); then
+                    if butl.is_declared "$arg_name"; then
+                        butl.set_var "$arg_name" "$arg"
+                    fi
+
+                    butl.set_var "__barg_arg_${arg_name}_filled" 1
+                    next_arg_index=$((next_arg_index + 1))
+                else
+                    if butl.is_declared "$arg_name"; then
+                        local current_values=()
+                        if butl.is_array "$arg_name"; then
+                            butl.copy_array "$arg_name" current_values
+                        fi
+
+                        current_values+=("$arg")
+                        butl.copy_array current_values "$arg_name"
+                    fi
+
+                    local filled_var="__barg_arg_${arg_name}_filled"
+                    local filled=${!filled_var:-0}
+                    filled=$((filled + 1))
+                    butl.set_var "$filled_var" "$filled"
+
+                    if ((filled >= ${#arg_values[@]})); then
+                        next_arg_index=$((next_arg_index + 1))
+                    fi
+                fi
+
+                processed_arg=1
+            fi
+        fi
+
+        if ((processed_arg)); then
+            continue
+        fi
+
+        if [[ "${__barg_catchall_arg:-}" ]]; then
+            local var_arg_allow_dash="__barg_arg_${__barg_catchall_arg}_allow_dash"
+            local arg_allow_dash=${!var_arg_allow_dash}
+
+            if [[ "$arg" == -?* ]]; then
+                if ((process_args_only || arg_allow_dash)); then
+                    catchall_array+=("$arg")
+                    continue
+                fi
+            else
+                catchall_array+=("$arg")
+                continue
+            fi
+        fi
+
+        butl.log_error "Unknown argument: ${BUTL_ANSI_UNDERLINE}${arg}${BUTL_ANSI_RESET_UNDERLINE}."
+        failed=1
+    done
+
+    if ! ((${__barg_disable_help:-0})) && ((${barg_help:-0})); then
+        if ((failed)); then
+            # Leave an empty line after the error messages
+            echo
+        fi
+
+        barg.print_usage
+        barg.reset
+        if butl.is_declared should_exit; then
+            butl.set_var should_exit 1
+            if ((failed)); then
+                if butl.is_declared should_exit_err; then
+                    butl.set_var should_exit_err 1
+                fi
+                return 1
+            else
+                return 0
+            fi
+        elif ((failed)); then
+            exit 1
+        else
+            exit 0
+        fi
+    fi
+
+    # Set the catchall flag if any
+    if [[ "${__barg_catchall_arg:-}" ]]; then
+        butl.copy_array "catchall_array" "$__barg_catchall_arg"
+    fi
+
+    __barg_postprocess_options
+    __barg_postprocess_flags
+    __barg_postprocess_args
+
+    if ((${#catchall_array[@]} == 0)) && [[ "${__barg_catchall_arg:-}" ]]; then
+        local var_catchall_required="__barg_arg_${__barg_catchall_arg}_required"
+        local catchall_required=${!var_catchall_required}
+
+        if ((catchall_required)); then
+            butl.log_error "Argument ${BUTL_ANSI_UNDERLINE}$arg${BUTL_ANSI_RESET_UNDERLINE} is required."
+            failed=1
+        fi
+    fi
+
+    if ((failed)) || __barg_has_subcommands 1; then
+        if ((failed)); then
+            # Leave an empty line after the error messages
+            echo
+        fi
+
+        barg.print_usage
+        barg.reset
+        if butl.is_declared should_exit; then
+            butl.set_var should_exit 1
+            if butl.is_declared should_exit_err; then
+                butl.set_var should_exit_err 1
+            fi
+            return 1
+        else
+            exit 1
+        fi
+    fi
+
+    barg.reset
+}
+
+__barg_parse_option() {
+    processed_arg=1
+    if ! butl.is_declared "$option"; then
+        return
+    fi
+
+    local option_values=()
+    butl.copy_array "__barg_option_${option}_values" option_values
+
+    local value_count=${#option_values[@]}
+    if ((value_count > $#)); then
+        : "Option ${BUTL_ANSI_UNDERLINE}${option_arg}${BUTL_ANSI_RESET_UNDERLINE}"
+        butl.log_error "$_ requires ${BUTL_ANSI_UNDERLINE}${value_count}${BUTL_ANSI_RESET_UNDERLINE} values."
+        failed=1
+        return
+    fi
+
+    local var_option_multi="__barg_option_${option}_multi"
+    local option_multi="${!var_option_multi}"
+
+    if ((option_multi)); then
+        local values=()
+        butl.copy_array "$option" "values"
+        values+=("${@:1:$value_count}")
+        butl.set_array "$option" "${values[@]}"
+    else
+        if ((value_count > 1)); then
+            butl.set_array "$option" "${@:1:$value_count}"
+        else
+            butl.set_var "$option" "$1"
+        fi
+    fi
+
+    # set implied flags to 1
+    local option_implies=()
+    butl.copy_array "__barg_option_${option}_implies" "option_implies"
+    for implied_flag in "${option_implies[@]-}"; do
+        if [[ ! "$implied_flag" ]]; then
+            continue
+        fi
+
+        if [[ " ${__barg_flags[*]} " != *" $implied_flag "* ]]; then
+            : "Option ${BUTL_ANSI_UNDERLINE}${option_arg}${BUTL_ANSI_RESET_UNDERLINE}"
+            : "$_ implies ${BUTL_ANSI_UNDERLINE}${implied_flag}${BUTL_ANSI_RESET_UNDERLINE},"
+            : "$_ but ${BUTL_ANSI_UNDERLINE}${implied_flag}${BUTL_ANSI_RESET_UNDERLINE}"
+            butl.log_error "$_ is not a flag."
+            failed=1
+            return
+        fi
+
+        butl.set_var "$implied_flag" 1
+    done
+
+    shift_count=$value_count
+
+    # mark the option as set
+    butl.set_var "__barg_option_${option}_set" 1
+}
+
+__barg_parse_flag() {
+    processed_arg=1
+    if ! butl.is_declared "$flag"; then
+        return
+    fi
+
+    butl.set_var "$flag" 1
+
+    # set implied flags to 1
+    local flag_implies=()
+    butl.copy_array "__barg_flag_${flag}_implies" "flag_implies"
+    for implied_flag in "${flag_implies[@]-}"; do
+        if [[ ! "$implied_flag" ]]; then
+            continue
+        fi
+
+        if [[ " ${__barg_flags[*]} " != *" $implied_flag "* ]]; then
+            butl.log_error "Flag $flag_arg implies '$implied_flag', but $implied_flag is not a flag."
+            failed=1
+            return
+        fi
+
+        butl.set_var "$implied_flag" 1
+    done
+}
+
+__barg_postprocess_options() {
+    # Fill from env or set default values for unset options
+    for option in "${__barg_options[@]-}"; do
+        if [[ ! "$option" ]]; then
+            continue
+        fi
+
+        # Make sure required options are set
+        local var_option_required="__barg_option_${option}_required"
+        local option_required=${!var_option_required}
+
+        local var_option_set="__barg_option_${option}_set"
+        local option_set=${!var_option_set}
+
+        local var_option_env="__barg_option_${option}_env"
+        local option_env=${!var_option_env-}
+
+        local option_defaults=()
+        butl.copy_array "__barg_option_${option}_defaults" option_defaults
+
+        # Skip if variable is not declared, or if an array; not empty.
+        if ! butl.is_declared "$option"; then
+            continue
+        fi
+
+        if ((option_set)); then
+            continue
+        fi
+
+        local option_is_updated=
+
+        # Set default value from enviornment
+        if [[ "$option_env" && "${!option_env+x}" ]]; then
+            # shellcheck disable=SC2059
+            butl.set_var "$option" "${!option_env}"
+
+            option_is_updated=1
+        elif ((${#option_defaults[@]})); then
+            if butl.is_array "$option"; then
+                butl.copy_array "$option" option_defaults
+                option_is_updated=1
+            else
+                # shellcheck disable=SC2059
+                butl.set_var "$option" "${option_defaults[0]}"
+
+                option_is_updated=1
+            fi
+        fi
+
+        if ((option_required)) && ! ((option_set || option_is_updated)) \
+            && ! { [[ "$option_env" && "${!option_env+x}" ]] || ((${#option_defaults[@]})); }; then
+            local var_option_long="__barg_option_${option}_long"
+            local option_param=${!var_option_long}
+            if [[ ! "$option_param" ]]; then # long form is not set, fall back to short form
+                local var_option_short="__barg_option_${option}_short"
+                local option_param=${var_option_short}
+            fi
+
+            butl.log_error "Option ${BUTL_ANSI_UNDERLINE}$option_param${BUTL_ANSI_RESET_UNDERLINE} is required."
+            failed=1
+            continue
+        fi
+
+        # Update implied flags
+        if ((option_is_updated)); then
+            # mark the option as set
+            butl.set_var "$var_option_set" 1
+
+            local option_implies=()
+            butl.copy_array "__barg_option_${option}_implies" "option_implies"
+            for implied_flag in "${option_implies[@]-}"; do
+                if [[ ! "$implied_flag" ]]; then
+                    continue
+                fi
+
+                if [[ " ${__barg_flags[*]} " != *" $implied_flag "* ]]; then
+                    butl.log_error "Option $option implies '$implied_flag', but $implied_flag is not a flag."
+                    failed=1
+                    return
+                fi
+
+                butl.set_var "$implied_flag" 1
+            done
+        fi
+    done
+}
+
+__barg_postprocess_flags() {
+    # Fill from env or set default values for unset flags
+    for flag in "${__barg_flags[@]-}"; do
+        if [[ ! "$flag" ]]; then
+            continue
+        fi
+
+        # Skip if variable is not declared or not empty
+        if ! butl.is_declared "$flag" || [[ "${!flag:-}" ]]; then
+            continue
+        fi
+
+        # Set default value from environment
+        local var_flag_env="__barg_flag_${flag}_env"
+        local flag_env=${!var_flag_env-}
+        if [[ ! "$flag_env" ]] || ! ((${!flag_env:-})); then
+            butl.set_var "$flag" ''
+            continue
+        fi
+
+        butl.set_var "$flag" 1
+
+        # Update implied flags
+        local flag_implies=()
+        butl.copy_array "__barg_flag_${flag}_implies" "flag_implies"
+        for implied_flag in "${flag_implies[@]-}"; do
+            if [[ ! "$implied_flag" ]]; then
+                continue
+            fi
+
+            if [[ " ${__barg_flags[*]} " != *" $implied_flag "* ]]; then
+                : "Flag ${BUTL_ANSI_UNDERLINE}${flag}${BUTL_ANSI_RESET_UNDERLINE}"
+                : "$_ implies ${BUTL_ANSI_UNDERLINE}${implied_flag}${BUTL_ANSI_RESET_UNDERLINE},"
+                : "$_ but ${BUTL_ANSI_UNDERLINE}${implied_flag}${BUTL_ANSI_RESET_UNDERLINE}"
+                butl.log_error "$_ is not a flag."
+                failed=1
+                continue
+            fi
+
+            butl.set_var "$implied_flag" 1
+        done
+    done
+}
+
+__barg_postprocess_args() {
+    # Check the values of normal arguments
+    for arg in "${__barg_args[@]-}"; do
+        if [[ ! "$arg" ]] || [[ "$arg" == "${__barg_catchall_arg:-}" ]]; then
+            continue
+        fi
+
+        local var_arg_filled="__barg_arg_${arg}_filled"
+        local arg_filled=${!var_arg_filled:-}
+
+        local arg_defaults=()
+        butl.copy_array "__barg_arg_${arg}_defaults" arg_defaults
+
+        # Make sure required args are set
+        local var_arg_required="__barg_arg_${arg}_required"
+        local arg_required=${!var_arg_required}
+        if ((arg_required)) && ! ((arg_filled)) && ! ((${#arg_defaults[@]})); then
+            butl.log_error "Argument ${BUTL_ANSI_UNDERLINE}$arg${BUTL_ANSI_RESET_UNDERLINE} is required."
+            failed=1
+            continue
+        fi
+
+        if ! butl.is_declared "$arg"; then
+            continue
+        fi
+
+        local arg_values=()
+        butl.copy_array "__barg_arg_${arg}_values" arg_values
+
+        if ((arg_filled == ${#arg_values[@]})); then
+            continue
+        fi
+
+        if ((arg_filled)); then
+            : "Argument ${BUTL_ANSI_UNDERLINE}$arg${BUTL_ANSI_RESET_UNDERLINE}"
+            butl.log_error "$_ requires ${#arg_values[@]} values, but only ${arg_filled} were given."
+            failed=1
+            continue
+        fi
+
+        # Set defaults
+        if butl.is_array "$arg"; then
+            butl.copy_array arg_defaults "$arg"
+            butl.set_var "$var_arg_filled" "${#arg_defaults[@]}"
+            arg_filled=${#arg_defaults[@]}
+        elif ((${#arg_defaults[@]} > 0)); then
+            butl.set_var "$arg" "${arg_defaults[0]}"
+            butl.set_var "$var_arg_filled" 1
+            arg_filled=1
+        fi
+    done
+}
+# BGEN__END /home/sdrm/projects/barg/lib/parse.sh
+# BGEN__BEGIN /home/sdrm/projects/barg/lib/usage.sh
+# BGEN__SHEBANG_REMOVED
+
+# BGEN__BEGIN /home/sdrm/projects/butl/lib/butl/columns.sh
+# BGEN__SHEBANG_REMOVED
+
+# Formats tab separated stdin entries as columns
+# @param out_separator:  String to separate the output with (default: '  ')
+# @param in_separator:  Single character to separate the input with (defualt '<tab>')
+butl.columns() {
+    local out_separator=${1:-"  "}
+    local in_separator=${2:-$'\t'}
+
+    if column -o "$out_separator" -s "$in_separator" -t -L 2>/dev/null; then
+        return
+    fi
+
+    # parse manually
+    local column_widths=()
+    local lines=()
+    local cell
+
+    # for each column find the longest cell
+    while IFS= read -r line; do
+        if [[ "$line" ]]; then
+            local i=0
+            while IFS= read -r cell; do
+                local cell_width
+                cell_width="${#cell}"
+                if ((cell_width > column_widths[i])); then
+                    column_widths[$i]="$cell_width"
+                fi
+                i=$((i + 1))
+            done <<<"${line//$in_separator/$'\n'}"
+        fi
+
+        lines+=("$line")
+    done
+
+    # generate a printf string such as it can print each cells at a given width
+    local printf_query
+    printf_query=$(printf -- "%%-%ss$out_separator" "${column_widths[@]::$((${#column_widths[@]} - 1))}")
+    printf_query+="%s"
+
+    for line in "${lines[@]-}"; do
+        local cells=()
+
+        if [[ ! "$line" ]]; then
+            # Replicating column behaviour
+            for cell in "${column_widths[@]}"; do
+                cells+=("")
+            done
+        else
+            while IFS= read -r cell; do
+                cells+=("$cell")
+            done <<<"${line//$in_separator/$'\n'}"
+        fi
+
+        # shellcheck disable=SC2059
+        printf "$printf_query\n" "${cells[@]}"
+    done
+}
+# BGEN__END /home/sdrm/projects/butl/lib/butl/columns.sh
+# BGEN__BEGIN /home/sdrm/projects/butl/lib/butl/strip_ansi.sh
+# BGEN__SHEBANG_REMOVED
+
+# Strips style ansi escape codes from string
+# @param input?:  Text to strip. If not set, reads from stdin
+butl.strip_ansi_style() {
+    local keep_extglob=0
+    if shopt -qp extglob; then
+        keep_extglob=1
+    fi
+
+    if (($#)); then
+        local input=$1
+    else
+        local input
+        read -d "" -r input || true
+    fi
+
+    shopt -s extglob
+    echo "${input//\\@(e|x1[bB])\[[0-9]?([0-9])*([;:]?([0-9]?([0-9])))[m]/}"
+
+    if ! ((keep_extglob)); then
+        shopt -u extglob
+    fi
+}
+
+# Strips all ansi escape codes from string
+# @param input?:  Text to strip. If not set, reads from stdin
+butl.strip_ansi() {
+    local keep_extglob=0
+    if shopt -qp extglob; then
+        keep_extglob=1
+    fi
+
+    if (($#)); then
+        local input=$1
+    else
+        local input
+        read -d "" -r input || true
+    fi
+
+    shopt -s extglob
+    echo "${input//\\@(e|x1[bB])\[[0-9]?([0-9])*([;:]?([0-9]?([0-9])))[ABCDEFGHJKSTfmin]/}"
+
+    if ! ((keep_extglob)); then
+        shopt -u extglob
+    fi
+}
+# BGEN__END /home/sdrm/projects/butl/lib/butl/strip_ansi.sh
+
+# Prints help/usage text base on the declared commands, arguments and options
+# shellcheck disable=SC2120
+barg.print_usage() {
+    local subcommand_name=${1:-}
+    if [[ "$subcommand_name" ]]; then
+        barg.print_subcommand_usage "$subcommand_name"
+        return
+    fi
+
+    # check whether script is source or directly executed
+    local process process_dir process_file process_base
+    if [[ "${__BGEN_PIPE_SOURCE__:-}" ]]; then
+        process="$__BGEN_PIPE_SOURCE__"
+    elif [[ "${BASH_SOURCE+x}" ]]; then
+        process="${BASH_SOURCE[0]}"
+    else
+        process="$0"
+    fi
+
+    # Set magic variables for current file, directory, os, etc.
+    process_dir="$(cd "$(dirname "${process}")" && pwd)"
+    process_file="${process_dir}/$(basename "${process}")"
+    # shellcheck disable=SC2034,SC2015
+    process_base="$(basename "${process_file}" .sh)"
+
+    local process_base=${process_base:-$0}
+    local arg_list=()
+    local section_break=
+
+    # shellcheck disable=SC2154
+    if ((${#__barg_subcommands[@]})); then
+        arg_list+=("SUBCOMMAND")
+    fi
+
+    # shellcheck disable=SC2154
+    if ((${#__barg_flags[@]})); then
+        arg_list+=("[FLAGS...]")
+    fi
+
+    # shellcheck disable=SC2154
+    if ((${#__barg_options[@]})); then
+        arg_list+=("[OPTIONS...]")
+    fi
+
+    # shellcheck disable=SC2154
+    local arg_count=${#__barg_args[@]}
+    if ((arg_count)); then
+        for arg in "${__barg_args[@]}"; do
+            # shellcheck disable=SC2154
+            if [[ "$arg" == "${__barg_catchall_arg:-}" ]]; then
+                continue
+            fi
+
+            local var_arg_values="__barg_arg_${arg}_values"
+            local arg_values=()
+            butl.copy_array "$var_arg_values" "arg_values"
+
+            local value="${arg_values[0]:-ARGS}"
+            arg_list+=("${value}")
+        done
+
+        # add the catch all at the end
+        if [[ "${__barg_catchall_arg:-}" ]]; then
+            local var_arg_values="__barg_arg_${__barg_catchall_arg}_values"
+            local arg_values=()
+            butl.copy_array "$var_arg_values" "arg_values"
+
+            local value="${arg_values[0]:-ARGS}"
+            arg_list+=("[${value}...]")
+        fi
+    fi
+
+    # Print usage
+    # shellcheck disable=SC2154
+    printf '%bUSAGE:%b\n' "$__barg_style_title" "$__barg_style_reset"
+    printf '    %s%s\n' "$process_base" "$(printf ' %s' "${arg_list[@]-}")"
+    section_break=1
+
+    # shellcheck disable=SC2154
+    local flag_desc_cr_threshold=$__barg_usage_flag_desc_length_threshold
+    # shellcheck disable=SC2154
+    local option_desc_cr_threshold=$__barg_usage_option_desc_length_threshold
+    # shellcheck disable=SC2154
+    local arg_desc_cr_threschold=$__barg_usage_arg_desc_length_threshold
+
+    __barg_print_usage_section "SUBCOMMANDS" "$(__barg_print_subcommands)"
+    __barg_print_usage_section "FLAGS" "$(__barg_print_flags)"
+    __barg_print_usage_section "OPTIONS" "$(__barg_print_options)"
+    __barg_print_usage_section "ARGUMENTS" "$(__barg_print_args)"
+}
+
+# Print usage text for a given subcommand
+barg.print_subcommand_usage() {
+    local subcommand="$1"
+
+    if butl.is_array __barg_subcommands && [[ " ${__barg_subcommands[*]-} " == *" $subcommand "* ]]; then
+        command_func_var="__barg_subcommand_${subcommand//-/_}_func"
+        command_func="${!command_func_var}"
+        barg.reset
+        "$command_func" --help
+        return
+    fi
+
+    local msg="There's no help subject on: ${BUTL_ANSI_UNDERLINE}${subcommand}${BUTL_ANSI_RESET_UNDERLINE}\n"
+    butl.log_error "$msg"
+    barg.print_usage
+    return 1
+}
+
+__barg_is_lastline_too_long() {
+    local size_threshold=$1
+    if ((size_threshold == 0)); then
+        return 1
+    fi
+
+    : "${2##*$'\n'}"
+    : "$(butl.strip_ansi_style "$_")"
+    ((${#_} > size_threshold))
+}
+
+__barg_print_usage_section() {
+    local title=$1
+    local text=$2
+
+    if [[ "$text" ]]; then
+        if ((section_break)); then
+            echo
+        fi
+
+        printf '%b%s:%b\n' "$__barg_style_title" "$title" "$__barg_style_reset"
+        butl.columns ' ' <<<"$text"
+
+        section_break=1
+    fi
+}
+
+__barg_print_subcommands() {
+    for subcommand in "${__barg_subcommands[@]-}"; do
+        [[ "$subcommand" ]] || continue
+        local subcommand_desc_var="__barg_subcommand_${subcommand//-/_}_desc"
+        local subcommand_desc="${!subcommand_desc_var:-}"
+        # shellcheck disable=SC2154
+        printf '    %b%s%b\t %s\n' "$__barg_style_arg" "$subcommand" \
+            "$__barg_style_reset" "$subcommand_desc"
+    done
+}
+
+__barg_print_flags() {
+    for flag in "${__barg_flags[@]-}"; do
+        if [[ ! "$flag" ]]; then
+            continue
+        fi
+
+        local flag_desc_var="__barg_flag_${flag}_desc"
+        local flag_desc="${!flag_desc_var:-}"
+
+        local flag_short_var="__barg_flag_${flag}_short"
+        local flag_short="${!flag_short_var:-}"
+
+        local flag_long_var="__barg_flag_${flag}_long"
+        local flag_long="${!flag_long_var:-}"
+
+        local flag_env_var="__barg_flag_${flag}_env"
+        local flag_env="${!flag_env_var:-}"
+
+        if [[ ! "${flag_short:-}${flag_long:-}" ]]; then
+            continue
+        fi
+
+        if [[ "${flag_short:-}" ]]; then
+            printf '    %b-%s%b' "$__barg_style_arg" "$flag_short" "$__barg_style_reset"
+        else
+            printf '    %b  %b' "$__barg_style_arg" "$__barg_style_reset"
+        fi
+
+        if [[ "${flag_short:-}" && "${flag_long:-}" ]]; then
+            printf ',\t'
+        else
+            printf '\t'
+        fi
+
+        if [[ "${flag_long:-}" ]]; then
+            printf '%b--%s%b' "$__barg_style_arg" "$flag_long" "$__barg_style_reset"
+        else
+            printf '%b%b' "$__barg_style_arg" "$__barg_style_reset"
+        fi
+
+        local desc=" $flag_desc"
+
+        if [[ "${flag_env}" ]]; then
+            if __barg_is_lastline_too_long "$flag_desc_cr_threshold" "$desc"; then
+                desc+=$'\n'
+            fi
+
+            # shellcheck disable=SC2154
+            desc+=$(printf ' %b[env: %b%s%b=%b%s%b]%b' "$__barg_style_info" \
+                "$__barg_style_info_var" "$flag_env" "$__barg_style_info_equals" \
+                "$__barg_style_info_value" "${!flag_env:-}" \
+                "$__barg_style_info" "$__barg_style_reset")
+        fi
+
+        : "${desc//$'\n'/$'\n\t\t '}"
+        printf '\t %s\n' "$_"
+    done
+}
+
+__barg_print_options() {
+    for option in "${__barg_options[@]-}"; do
+        if [[ ! "$option" ]]; then
+            continue
+        fi
+
+        local option_desc_var="__barg_option_${option}_desc"
+        local option_desc=${!option_desc_var:-}
+
+        local option_short_var="__barg_option_${option}_short"
+        local option_short=${!option_short_var:-}
+
+        local option_long_var="__barg_option_${option}_long"
+        local option_long=${!option_long_var:-}
+
+        local option_env_var="__barg_option_${option}_env"
+        local option_env=${!option_env_var:-}
+
+        local option_values
+        butl.copy_array "__barg_option_${option}_values" option_values
+
+        local option_defaults
+        butl.copy_array "__barg_option_${option}_defaults" option_defaults
+
+        if [[ ! "${option_short:-}${option_long:-}" ]]; then
+            continue
+        fi
+
+        printf '    '
+
+        if [[ "${__barg_options_have_short:-}" ]]; then
+            if [[ "${option_short:-}" ]]; then
+                printf '%b-%s%b' "$__barg_style_arg" "$option_short" "$__barg_style_reset"
+            else
+                printf '%b  %b' "$__barg_style_arg" "$__barg_style_reset"
+            fi
+
+            if [[ "${option_short:-}" && "${option_long:-}" ]]; then
+                printf ',\t'
+            else
+                printf '\t'
+            fi
+        fi
+
+        if [[ "${__barg_options_have_long:-}" ]]; then
+            if [[ "${option_long:-}" ]]; then
+                printf '%b--%s%b' "$__barg_style_arg" "$option_long" "$__barg_style_reset"
+            else
+                printf '%b%b' "$__barg_style_arg" "$__barg_style_reset"
+            fi
+        fi
+
+        if [[ "${option_values[0]-}" ]]; then
+            local values_str
+            values_str=$(printf ' <%s>' "${option_values[@]}")
+            if [[ ! "${option_long:-}" ]]; then
+                values_str=${values_str:1}
+            fi
+            printf '%b%s%b' "$__barg_style_arg" "$values_str" "$__barg_style_reset"
+        fi
+
+        local desc="$option_desc"
+
+        if [[ "${option_defaults[0]-}" ]]; then
+            if __barg_is_lastline_too_long "$option_desc_cr_threshold" "$desc"; then
+                desc+=$'\n'
+            fi
+
+            local join_separator="$__barg_style_reset, $__barg_style_info_value"
+            desc+=$(printf ' %b[default: %b%b%b]%b' "$__barg_style_info" "$__barg_style_info_value" \
+                "$(butl.join_by "$join_separator" "${option_defaults[@]}")" \
+                "$__barg_style_info" "$__barg_style_reset")
+        fi
+
+        if [[ "${option_env}" ]]; then
+            if __barg_is_lastline_too_long "$option_desc_cr_threshold" "$desc"; then
+                desc+=$'\n'
+            fi
+
+            desc+=$(printf ' %b[env: %b%s%b=%b%s%b]%b' "$__barg_style_info" \
+                "$__barg_style_info_var" "$option_env" "$__barg_style_info_equals" \
+                "$__barg_style_info_value" "${!option_env:-}" \
+                "$__barg_style_info" "$__barg_style_reset")
+        fi
+
+        : "${desc//$'\n'/$'\n\t\t'}"
+        printf '\t %s\n' "$_"
+    done
+}
+
+__barg_print_args() {
+    for arg in "${__barg_args[@]-}"; do
+        if [[ ! "$arg" ]]; then
+            continue
+        fi
+
+        local arg_desc_var="__barg_arg_${arg}_desc"
+        local arg_desc=${!arg_desc_var:-}
+
+        local arg_env_var="__barg_arg_${arg}_env"
+        local arg_env=${!arg_env_var:-}
+
+        local arg_values
+        butl.copy_array "__barg_arg_${arg}_values" arg_values
+
+        local arg_defaults
+        butl.copy_array "__barg_arg_${arg}_defaults" arg_defaults
+
+        if [[ "${arg_values[0]-}" ]]; then
+            printf '   %b%s%b' "$__barg_style_arg" \
+                "$(printf ' <%s>' "${arg_values[@]}")" "$__barg_style_reset"
+        fi
+
+        local desc=" $arg_desc"
+
+        if [[ "${arg_defaults[0]-}" ]]; then
+            if __barg_is_lastline_too_long "$arg_desc_cr_threschold" "$desc"; then
+                desc+=$'\n'
+            fi
+
+            local join_separator="$__barg_style_reset, $__barg_style_info_value"
+            desc+=$(printf ' %b[default: %b%b%b]%b' \
+                "$__barg_style_info" "$__barg_style_info_value" \
+                "$(butl.join_by "$join_separator" "${arg_defaults[@]}")" \
+                "$__barg_style_info" "$__barg_style_reset")
+        fi
+
+        if [[ "${arg_env}" ]]; then
+            if __barg_is_lastline_too_long "$arg_desc_cr_threschold" "$desc"; then
+                desc+=$'\n'
+            fi
+
+            desc+=$(printf ' %b[env: %b%s%b=%b%s%b]%b' \
+                "$__barg_style_info" "$__barg_style_info_var" \
+                "$arg_env" "$__barg_style_info_equals" "$__barg_style_info_value" \
+                "${!arg_env:-}" "$__barg_style_info" "$__barg_style_reset")
+        fi
+
+        : "${desc//$'\n'/$'\n\t'}"
+        printf '\t %s\n' "$_"
+    done
+}
+# BGEN__END /home/sdrm/projects/barg/lib/usage.sh
+
+# shellcheck disable=SC2034
+: "${__barg_style_title:="${BUTL_ANSI_RESET}${BUTL_ANSI_YELLOW}"}"
+# shellcheck disable=SC2034
+: "${__barg_style_arg:="${BUTL_ANSI_RESET}${BUTL_ANSI_GREEN}"}"
+# shellcheck disable=SC2034
+: "${__barg_style_info:="${BUTL_ANSI_RESET}${BUTL_ANSI_DIM}"}"
+# shellcheck disable=SC2034
+: "${__barg_style_info_var:="${__barg_style_info}${BUTL_ANSI_UNDERLINE}"}"
+# shellcheck disable=SC2034
+: "${__barg_style_info_equals:="${__barg_style_info}"}"
+# shellcheck disable=SC2034
+: "${__barg_style_info_value:="${BUTL_ANSI_RESET}${BUTL_ANSI_CYAN}"}"
+# shellcheck disable=SC2034
+: "${__barg_style_reset:="${BUTL_ANSI_RESET}"}"
+
+# shellcheck disable=SC2034
+: "${__barg_usage_arg_desc_length_threshold:=0}"
+# shellcheck disable=SC2034
+: "${__barg_usage_flag_desc_length_threshold:=0}"
+# shellcheck disable=SC2034
+: "${__barg_usage_option_desc_length_threshold:=0}"
+
+# Declare a subcommand
+# @param subcommand         name of the subcommand
+# @param subcommand_func    command to call for this subcommand
+# shellcheck disable=2059
+barg.subcommand() {
+    local subcommand=$1
+    local subcommand_func=$2
+    local subcommand_desc=$3
+
+    if ! butl.is_array __barg_subcommands; then
+        __barg_subcommands=()
+    fi
+
+    __barg_subcommands+=("$subcommand")
+
+    printf -v "__barg_subcommand_${subcommand//-/_}_func" "$subcommand_func"
+    printf -v "__barg_subcommand_${subcommand//-/_}_desc" "$subcommand_desc"
+}
+
+# When called, barg doesn't append its help command/flag
+barg.disable_help() {
+    # shellcheck disable=SC2034
+    __barg_disable_help=1
+}
+
+# Declare an argument
+# shellcheck disable=2059
+barg.arg() {
+    local second_pass_args=()
+    local arg_values=()
+    local arg_defaults=()
+    local arg_implies=()
+    local arg_multi=
+
+    local arg=
+    local arg_desc=
+    local arg_short=
+    local arg_long=
+    local arg_env=
+    local arg_hidden=
+    local arg_allow_dash=
+    local arg_required=
+
+    while (($#)); do
+        case "$1" in
+        --value)
+            arg_values+=("$2")
+            shift 2
+            ;;
+        --value=*)
+            arg_values+=("${1#--value=}")
+            shift
+            ;;
+        *)
+            second_pass_args+=("$1")
+            shift
+            ;;
+        esac
+    done
+    if ((${#second_pass_args[@]})); then
+        set -- "${second_pass_args[@]}"
+    fi
+
+    while (($#)); do
+        case "$1" in
+        --short)
+            arg_short=$2
+            shift 2
+            ;;
+        --short=*)
+            arg_short=${1#--short=}
+            shift
+            ;;
+        --long)
+            arg_long=$2
+            shift 2
+            ;;
+        --long=*)
+            arg_long=${1#--long=}
+            shift
+            ;;
+        --desc)
+            arg_desc=$2
+            shift 2
+            ;;
+        --desc=*)
+            arg_desc=${1#--desc=}
+            shift
+            ;;
+        --env)
+            arg_env=$2
+            shift 2
+            ;;
+        --env=*)
+            arg_env=${1#--env=}
+            shift
+            ;;
+        --default)
+            arg_defaults+=("$2")
+            shift 2
+            ;;
+        --default=*)
+            arg_defaults+=("${1#--default=}")
+            shift
+            ;;
+        --defaults)
+            local value_count=${#arg_values[@]}
+            arg_defaults=("${@:1:$value_count}")
+            shift "$value_count"
+            ;;
+        --multi)
+            arg_multi=1
+            shift
+            ;;
+        --implies)
+            arg_implies+=("$2")
+            shift 2
+            ;;
+        --implies=*)
+            arg_implies+=("${1#--implies=}")
+            shift
+            ;;
+        --hidden)
+            arg_hidden=1
+            shift
+            ;;
+        --allow-dash)
+            local arg_allow_dash=1
+            shift
+            ;;
+        --required)
+            local arg_required=1
+            shift
+            ;;
+        *)
+            if [[ "$arg" ]]; then
+                butl.fail "barg.arg: expected 1 argument ($arg), but another one was given: $1"
+                return
+            fi
+
+            local arg="$1"
+            shift
+            ;;
+        esac
+    done
+
+    if ((${#arg_values[@]})) && [[ "$arg_short" || "$arg_long" ]]; then
+        # handle options
+        butl.is_array __barg_options || __barg_options=()
+
+        butl.set_var "__barg_option_${arg}_desc" "${arg_desc:-}"
+        butl.set_var "__barg_option_${arg}_short" "${arg_short:-}"
+        butl.set_var "__barg_option_${arg}_long" "${arg_long:-}"
+        butl.set_var "__barg_option_${arg}_env" "${arg_env:-}"
+        butl.set_var "__barg_option_${arg}_multi" "${arg_multi:-}"
+        butl.set_var "__barg_option_${arg}_hidden" "${arg_hidden:-}"
+        butl.set_var "__barg_option_${arg}_required" "${arg_required:-}"
+        butl.copy_array arg_values "__barg_option_${arg}_values"
+        butl.copy_array arg_defaults "__barg_option_${arg}_defaults"
+        butl.copy_array arg_implies "__barg_option_${arg}_implies"
+
+        if [[ "${arg_short:-}" ]]; then
+            butl.set_var "__barg_options_have_short" 1
+        fi
+
+        if [[ "${arg_long:-}" ]]; then
+            butl.set_var "__barg_options_have_long" 1
+        fi
+
+        __barg_options+=("$arg")
+    elif [[ "$arg_short" || "$arg_long" ]]; then
+        # handle flags
+        butl.is_array __barg_flags || __barg_flags=()
+
+        butl.set_var "__barg_flag_${arg}_desc" "${arg_desc:-}"
+        butl.set_var "__barg_flag_${arg}_short" "${arg_short:-}"
+        butl.set_var "__barg_flag_${arg}_long" "${arg_long:-}"
+        butl.set_var "__barg_flag_${arg}_env" "${arg_env:-}"
+        butl.set_var "__barg_flag_${arg}_hidden" "${arg_hidden:-}"
+        butl.copy_array arg_implies "__barg_flag_${arg}_implies"
+
+        if [[ "${arg_short:-}" ]]; then
+            butl.set_var "__barg_flags_have_short" 1
+        fi
+
+        if [[ "${arg_long:-}" ]]; then
+            butl.set_var "__barg_flags_have_long" 1
+        fi
+
+        __barg_flags+=("$arg")
+    elif ((${#arg_values[@]})); then
+        if ((arg_multi)); then
+            if [[ "${__barg_catchall_arg:-}" ]]; then
+                butl.fail "cannot define more than one catchall argument"
+                return
+            fi
+
+            __barg_catchall_arg=$arg
+        fi
+
+        # handle arguments
+        butl.is_array __barg_args || __barg_args=()
+
+        butl.set_var "__barg_arg_${arg}_desc" "${arg_desc:-}"
+        butl.set_var "__barg_arg_${arg}_env" "${arg_env:-}"
+        butl.set_var "__barg_arg_${arg}_hidden" "${arg_hidden:-}"
+        butl.set_var "__barg_arg_${arg}_allow_dash" "${arg_allow_dash:-}"
+        butl.set_var "__barg_arg_${arg}_required" "${arg_required:-}"
+        butl.copy_array arg_values "__barg_arg_${arg}_values"
+        butl.copy_array arg_defaults "__barg_arg_${arg}_defaults"
+
+        __barg_args+=("$arg")
+    else
+        butl.fail "Argument should either have a --long/-short form, a value name, or both."
+    fi
+}
+
+# Resets internal variables to their clean state
+# shellcheck disable=SC2154
+barg.reset() {
+    unset __barg_disable_help
+
+    unset __barg_subcommands
+    unset "${!__barg_subcommand_@}"
+
+    unset __barg_flags
+    unset "${!__barg_flag_@}"
+    unset "${!__barg_flags_@}"
+
+    unset __barg_options
+    unset "${!__barg_option_@}"
+    unset "${!__barg_options_@}"
+
+    unset __barg_args
+    unset "${!__barg_arg_@}"
+    unset "${!__barg_args_@}"
+
+    unset __barg_catchall_arg
+}
+
+# Checks if there are any subcommands
+__barg_has_subcommands() {
+    if ! butl.is_array __barg_subcommands || ((${#__barg_subcommands[@]} == 0)); then
+        return 1
+    fi
+
+    local count_hidden=${1:-0}
+    if ((count_hidden)); then
+        return 0
+    fi
+
+    local count=0
+    for subcommand in "${__barg_subcommands[@]}"; do
+        local var_subcommand_hidden="__barg_subcommand_${subcommand}_hidden"
+        local subcommand_hidden=${!var_subcommand_hidden:-}
+
+        if ! ((subcommand_hidden)); then
+            count=$((count += 1))
+        fi
+    done
+
+    ((count > 0))
+}
+
+# Checks if there are any options
+__barg_has_options() {
+    if ! butl.is_array __barg_options || ((${#__barg_options[@]} == 0)); then
+        return 1
+    fi
+
+    local count_hidden=${1:-0}
+    if ((count_hidden)); then
+        return 0
+    fi
+
+    local count=0
+    for option in "${__barg_options[@]}"; do
+        local var_option_hidden="__barg_option_${option}_hidden"
+        local option_hidden=${!var_option_hidden:-}
+
+        if ! ((option_hidden)); then
+            count=$((count += 1))
+        fi
+    done
+
+    ((count > 0))
+}
+
+# Checks if there are any flags
+__barg_has_flags() {
+    if ! butl.is_array __barg_flags || ((${#__barg_flags[@]} == 0)); then
+        return 1
+    fi
+
+    local count_hidden=${1:-0}
+    if ((count_hidden)); then
+        return 0
+    fi
+
+    local count=0
+    for flag in "${__barg_flags[@]}"; do
+        local var_flag_hidden="__barg_flag_${flag}_hidden"
+        local flag_hidden=${!var_flag_hidden:-}
+
+        if ! ((flag_hidden)); then
+            count=$((count += 1))
+        fi
+    done
+
+    ((count > 0))
+}
+
+# Checks if there are any args
+__barg_has_args() {
+    if ! butl.is_array __barg_args || ((${#__barg_args[@]} == 0)); then
+        return 1
+    fi
+
+    local count_hidden=${1:-0}
+    if ((count_hidden)); then
+        return 0
+    fi
+
+    local count=0
+    for arg in "${__barg_args[@]}"; do
+        local var_arg_hidden="__barg_arg_${arg}_hidden"
+        local arg_hidden=${!var_arg_hidden:-}
+
+        if ! ((arg_hidden)); then
+            count=$((count += 1))
+        fi
+    done
+
+    ((count > 0))
+}
+# BGEN__END /home/sdrm/projects/barg/lib/barg.sh
+
+# BGEN__BEGIN /tools/rnchr/lib/rnchr/_utils.sh
+# BGEN__SHEBANG_REMOVED
+
+rnchr_args() {
+    barg.arg rancher_url \
+        --required \
+        --long=url \
+        --value=URL \
+        --env=RANCHER_URL \
+        --desc="Specify the Rancher API endpoint URL"
+    barg.arg rancher_access_key \
+        --required \
+        --long=access-key \
+        --value=ACCESS_KEY \
+        --env=RANCHER_ACCESS_KEY \
+        --desc="Specify the Rancher API access key"
+    barg.arg rancher_secret_key \
+        --required \
+        --long=secret-key \
+        --value=SECRET_KEY \
+        --env=RANCHER_SECRET_KEY \
+        --desc="Specify the Rancher API secret key"
+}
+
+rnchr_env_args() {
+    rnchr_args
+
+    barg.arg rancher_env \
+        --long=env \
+        --value=ENV \
+        --env=RANCHER_ENVIRONMENT \
+        --desc="Environment name or ID"
+}
+# BGEN__END /tools/rnchr/lib/rnchr/_utils.sh
+# BGEN__BEGIN /tools/rnchr/lib/rnchr/env.sh
+# BGEN__SHEBANG_REMOVED
+
+__rnchr_last_env_name="__@_NOT_AN_ENV_NAME__"
+__rnchr_last_env_id=
+
+rnchr_env_get_id() {
+    rnchr_args
+    barg.arg environment \
+        --required \
+        --value=environment \
+        --desc="Environment name"
+
+    local rancher_url=
+    local rancher_access_key=
+    local rancher_secret_key=
+    local environment=
+    barg.parse "$@"
+
+    if [[ "$environment" == "$__rnchr_last_env_name" ]]; then
+        if butl.is_declared r_env_id; then
+            r_env_id=$__rnchr_last_env_id
+        fi
+
+        echo "$__rnchr_last_env_id"
+        return
+    fi
+
+    if [[ ! "$environment" ]]; then
+        local r_resp=
+        rnchr_api \
+            --url "$rancher_url" \
+            --access-key "$rancher_access_key" \
+            --secret-key "$rancher_secret_key" \
+            "userpreferences?name=defaultProjectId" >/dev/null || return
+
+        local default_env_id
+        default_env_id=$(jq -Mr '.data[0].value | select(. | null)' <<<"$r_resp")
+
+        local env_id=
+        env_id=$(jq --argjson env "$default_env_id" -Mrn '$env')
+
+        if [[ "$env_id" ]]; then
+            __rnchr_last_env_name=$environment
+            __rnchr_last_env_id=$env_id
+
+            if butl.is_declared r_env_id; then
+                r_env_id=$env_id
+            fi
+
+            echo "$env_id"
+            return
+        fi
+    fi
+
+    if [[ "$environment" =~ 1a[[:digit:]]+ ]]; then
+        echo "$environment"
+        return
+    fi
+
+    local r_resp=
+    rnchr_api \
+        --url "$rancher_url" \
+        --access-key "$rancher_access_key" \
+        --secret-key "$rancher_secret_key" \
+        "projects/" \
+        --get --data-urlencode "name=$environment" >/dev/null || return
+
+    if [[ "$r_resp" && "$(jq -Mr '.data | length' <<<"$r_resp")" -ne 0 ]]; then
+        local env_id=
+        env_id=$(jq -Mr '.data[0].id | select(. != null)' <<<"$r_resp")
+
+        if [[ "$env_id" ]]; then
+            __rnchr_last_env_name=$environment
+            __rnchr_last_env_id=$env_id
+
+            if butl.is_declared r_env_id; then
+                r_env_id=$env_id
+            fi
+
+            echo "$env_id"
+            return
+        fi
+    fi
+
+    butl.fail "Environment $environment not found"
+}
+# BGEN__END /tools/rnchr/lib/rnchr/env.sh
+# BGEN__BEGIN /tools/rnchr/lib/rnchr/container.sh
+# BGEN__SHEBANG_REMOVED
+
+# BGEN__ALREADY_IMPORTED /tools/rnchr/lib/rnchr/_utils.sh
+# BGEN__BEGIN /tools/rnchr/lib/rnchr/api.sh
+# BGEN__SHEBANG_REMOVED
+
+# BGEN__ALREADY_IMPORTED /tools/rnchr/lib/rnchr/_utils.sh
+# BGEN__ALREADY_IMPORTED /tools/rnchr/lib/rnchr/env.sh
+
+rnchr_api() {
+    rnchr_args
+    barg.arg endpoint \
+        --value=endpoint \
+        --desc="The endpoint to call"
+    barg.arg args \
+        --multi \
+        --value=args \
+        --allow-dash \
+        --desc="Arguments to pass to curl"
+
+    local rancher_url=
+    local rancher_access_key=
+    local rancher_secret_key=
+    local endpoint=
+    local args=()
+    barg.parse "$@"
+
+    endpoint=${endpoint#/}
+
+    local url
+    if [[ "$endpoint" =~ ^https?\:\/\/ ]]; then
+        url=$endpoint
+    else
+        rancher_url=${rancher_url%/}
+        if [[ ! "$rancher_url" ]]; then
+            butl.fail "${BUTL_ANSI_UNDERLINE}RANCHER_URL${BUTL_ANSI_RESET_UNDERLINE} is required"
+            return
+        fi
+
+        url="${rancher_url}/${endpoint}"
+    fi
+
+    if [[ ! "$rancher_access_key" ]]; then
+        butl.fail "${BUTL_ANSI_UNDERLINE}RANCHER_ACCESS_KEY${BUTL_ANSI_RESET_UNDERLINE} is required"
+        return
+    fi
+
+    if [[ ! "$rancher_secret_key" ]]; then
+        butl.fail "${BUTL_ANSI_UNDERLINE}RANCHER_SECRET_KEY${BUTL_ANSI_RESET_UNDERLINE} is required"
+        return
+    fi
+
+    butl.log_debug "curl: $url"
+
+    local response
+    response=$(curl -fsSL \
+        --user "$rancher_access_key:$rancher_secret_key" \
+        -H 'Accept: application/json' \
+        -H 'Content-Type: application/json' \
+        "${args[@]}" "${url}")
+
+    if butl.is_declared r_resp; then
+        r_resp=$response
+    fi
+
+    echo "$response"
+}
+
+rnchr_env_api() {
+    rnchr_env_args
+    barg.arg endpoint \
+        --value=endpoint \
+        --desc="The endpoint to call"
+    barg.arg args \
+        --multi \
+        --value=args \
+        --allow-dash \
+        --desc="Arguments to pass to curl"
+
+    local rancher_url=
+    local rancher_access_key=
+    local rancher_secret_key=
+    local rancher_env=
+    local endpoint=
+    local args=()
+    barg.parse "$@"
+
+    # Retrieve the environment id, or default environment if unspecified
+    local r_env_id=
+    rnchr_env_get_id "$rancher_env" >/dev/null || return
+
+    # Make API request
+    rnchr_api "projects/${r_env_id}/${endpoint#/}" "${args[@]}"
+}
+# BGEN__END /tools/rnchr/lib/rnchr/api.sh
+# BGEN__BEGIN /tools/rnchr/lib/rnchr/stack.sh
+# BGEN__SHEBANG_REMOVED
+
+# BGEN__ALREADY_IMPORTED /tools/rnchr/lib/rnchr/_utils.sh
+# BGEN__ALREADY_IMPORTED /tools/rnchr/lib/rnchr/api.sh
+
+rnchr_stack_get() {
+    rnchr_env_args
+    barg.arg name \
+        --required \
+        --value=container \
+        --desc="Container to get the ID of"
+
+    local rancher_url=
+    local rancher_access_key=
+    local rancher_secret_key=
+    local rancher_env=
+    local name=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local query=
+    if [[ "$name" =~ 1st[[:digit:]]+ ]]; then
+        query="id=$name"
+    else
+        query="name=$name"
+    fi
+
+    local r_resp=
+    rnchr_env_api \
+        --url "$rancher_url" \
+        --access-key "$rancher_access_key" \
+        --secret-key "$rancher_secret_key" \
+        --env "$rancher_env" \
+        "stacks" --get --data-urlencode "$query" >/dev/null || return
+
+    if [[ "$r_resp" && "$(jq -Mr '.data | length' <<<"$r_resp")" -gt 0 ]]; then
+        local json
+        json=$(jq -Mc '.data[0] | select(. != null)' <<<"$r_resp") || return
+
+        if [[ "$json" ]]; then
+            if butl.is_declared r_stack; then
+                # shellcheck disable=SC2034
+                r_stack=$json
+            fi
+
+            echo "$json"
+            return
+        fi
+    fi
+
+    butl.fail "Stack ${BUTL_ANSI_UNDERLINE}$name${BUTL_ANSI_RESET_UNDERLINE} not found"
+}
+
+rnchr_stack_get_services() {
+    rnchr_env_args
+    barg.arg name \
+        --required \
+        --value=container \
+        --desc="Container to get the ID of"
+
+    local rancher_url=
+    local rancher_access_key=
+    local rancher_secret_key=
+    local rancher_env=
+    local name=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local query=
+    if [[ "$name" =~ 1st[[:digit:]]+ ]]; then
+        query="id=$name"
+    else
+        query="name=$name"
+    fi
+
+    local r_stack=
+    rnchr_stack_get \
+        --url "$rancher_url" \
+        --access-key "$rancher_access_key" \
+        --secret-key "$rancher_secret_key" \
+        --env "$rancher_env" \
+        "$name" >/dev/null || return
+
+    local stack_id
+    stack_id=$(jq -Mr '.id | select(. != null)' <<<"$r_stack")
+
+    local r_resp=
+    rnchr_env_api \
+        --url "$rancher_url" \
+        --access-key "$rancher_access_key" \
+        --secret-key "$rancher_secret_key" \
+        --env "$rancher_env" \
+        "stacks/$stack_id/services" >/dev/null || return
+
+    r_resp=$(jq -Mc '.data | select(. != null)' <<<"$r_resp") || return
+
+    if [[ "$r_resp" ]]; then
+        if butl.is_declared r_services; then
+            # shellcheck disable=SC2034
+            r_services=$r_resp
+        fi
+
+        echo "$r_resp"
+        return
+    fi
+
+    echo "[]"
+}
+# BGEN__END /tools/rnchr/lib/rnchr/stack.sh
+
+rnchr_container_get_id() {
+    rnchr_env_args
+    barg.arg name \
+        --required \
+        --value=container \
+        --desc="Container to get the ID of"
+
+    local rancher_url=
+    local rancher_access_key=
+    local rancher_secret_key=
+    local rancher_env=
+    local name=
+    barg.parse "$@"
+
+    if [[ "$name" =~ 1i[[:digit:]]+ ]]; then
+        echo "$name"
+        return
+    fi
+
+    # If the name contains a slash, assume it's <stack>/<service>
+    if [[ "$name" =~ \/ ]]; then
+        local stack_name=${name%%\/*}
+        local service_name=${name##*\/}
+
+        local r_services=
+        rnchr_stack_get_services \
+            --url "$rancher_url" \
+            --access-key "$rancher_access_key" \
+            --secret-key "$rancher_secret_key" \
+            --env "$rancher_env" \
+            "$stack_name" >/dev/null || return
+
+        if [[ "$(jq -Mr '. | length' <<<"$r_services")" -gt 0 ]]; then
+            # Select the first of potentially many containers for this service
+            container_id=$(jq -Mr --arg service "$service_name" '
+                .[] | select(.name == $service) | .instanceIds[0] | select(. != null)
+            ' <<<"$r_services")
+
+            if [[ "$container_id" ]]; then
+                if butl.is_declared r_container_id; then
+                    # shellcheck disable=SC2034
+                    r_container_id=$container_id
+                fi
+
+                echo "$container_id"
+                return
+            fi
+        fi
+    fi
+
+    local r_resp=
+    rnchr_env_api \
+        --url "$rancher_url" \
+        --access-key "$rancher_access_key" \
+        --secret-key "$rancher_secret_key" \
+        --env "$rancher_env" \
+        "containers" \
+        --get --data-urlencode "name=$name" >/dev/null || return
+
+    if [[ "$r_resp" && "$(jq -Mr '.data | length' <<<"$r_resp")" -ne 0 ]]; then
+        local container_id
+        container_id=$(jq -Mr '.data[0].id | select(. != null)' <<<"$r_resp")
+
+        if [[ "$container_id" ]]; then
+            if butl.is_declared r_container_id; then
+                # shellcheck disable=SC2034
+                r_container_id=$container_id
+            fi
+
+            echo "$container_id"
+            return
+        fi
+    fi
+
+    butl.fail "Container ${BUTL_ANSI_UNDERLINE}$name${BUTL_ANSI_RESET_UNDERLINE} not found"
+}
+
+rnchr_container_exec() {
+    rnchr_env_args
+    barg.arg container \
+        --required \
+        --value=CONTAINER \
+        --desc="Container name or container ID"
+    barg.arg command \
+        --required \
+        --multi \
+        --value=ARGS \
+        --desc="Commands to execute"
+
+    local command=()
+    local container=
+    local rancher_url=
+    local rancher_access_key=
+    local rancher_secret_key=
+    local rancher_env=
+    barg.parse "$@"
+
+    if ! ((${#command[@]})); then
+        return 0
+    fi
+
+    local r_container_id=
+    rnchr_container_get_id "$container" >/dev/null || return
+
+    local stdout_marker="__STDOUT_${RANDOM}__"
+    local stderr_marker="__STDERR_${RANDOM}__"
+
+    local cmd_wrapper="
+        tmp=\$(mktemp -d)
+        (${command[*]}) 1>\"\$tmp/stdout\" 2>\"\$tmp/stderr\"
+        err=\$?
+        cat \"\$tmp/stdout\"
+        printf \"$stdout_marker\"
+        cat \"\$tmp/stderr\"
+        printf \"$stderr_marker\"
+        echo \$err
+        rm -rf \"\$tmp\"
+    "
+
+    local query
+    query=$(jq --arg cmd "$cmd_wrapper" -Mnc '{
+        "attachStdin":false,
+        "attachStdout":true,
+        "command":["bash", "-c", $cmd],
+        "tty":false}
+    ')
+
+    local r_resp=
+    rnchr_env_api \
+        --url "$rancher_url" \
+        --access-key "$rancher_access_key" \
+        --secret-key "$rancher_secret_key" \
+        --env "$rancher_env" \
+        "containers/$r_container_id/?action=execute" \
+        -X POST -d "$query" >/dev/null || return
+
+    local token
+    token=$(jq -Mr '.token' <<<"$r_resp")
+
+    local url
+    url=$(jq -Mr '.url' <<<"$r_resp")
+
+    local output
+    output=$(websocat -E "${url}?token=${token}" | base64 -d | tr -d '\0')
+
+    : "${output%%"${stdout_marker}"*}"
+    : "${_#$'\x01\x01'?}"
+    : "${_#$'\x01'?}"
+    : "${_%$'\x01'?}"
+    local stdout=${_%[[:space:]]}
+    if [[ "$stdout" =~ [^[:cntrl:]] ]]; then
+        printf '%b\n' "$stdout"
+        # printf '%b\n' "$(cat -etv <<<"$stdout")"
+    fi
+
+    : "${output##*"${stdout_marker}"}"
+    : "${_%%"${stderr_marker}"*}"
+    : "${_#$'\x01\x01'?}"
+    : "${_#$'\x01'?}"
+    : "${_%$'\x01'?}"
+    local stderr=${_%[[:space:]]}
+    if [[ "$stderr" =~ [^[:cntrl:]] ]]; then
+        printf '%b\n' "$stderr" >&2
+    fi
+
+    return "${output##*"${stderr_marker}"}"
+}
+# BGEN__END /tools/rnchr/lib/rnchr/container.sh
+# BGEN__BEGIN /tools/rnchr/lib/rnchr/secret.sh
+# BGEN__SHEBANG_REMOVED
+
+# BGEN__ALREADY_IMPORTED /tools/rnchr/lib/rnchr/_utils.sh
+# BGEN__ALREADY_IMPORTED /tools/rnchr/lib/rnchr/api.sh
+
+rnchr_secret_get() {
+    rnchr_env_args
+    barg.arg name \
+        --required \
+        --value=container \
+        --desc="Container to get the ID of"
+
+    local rancher_url=
+    local rancher_access_key=
+    local rancher_secret_key=
+    local rancher_env=
+    local name=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local query=
+    if [[ "$name" =~ 1se[[:digit:]]+ ]]; then
+        query="id=$name"
+    else
+        query="name=$name"
+    fi
+
+    local r_resp=
+    rnchr_env_api \
+        --url "$rancher_url" \
+        --access-key "$rancher_access_key" \
+        --secret-key "$rancher_secret_key" \
+        --env "$rancher_env" \
+        "secrets" --get --data-urlencode "$query" >/dev/null || return
+
+    if [[ "$r_resp" && "$(jq -Mr '.data | length' <<<"$r_resp")" -gt 0 ]]; then
+        local json
+        json=$(jq -Mc '.data[0] | select(. != null)' <<<"$r_resp") || return
+
+        if [[ "$json" ]]; then
+            if butl.is_declared r_secret; then
+                # shellcheck disable=SC2034
+                r_secret=$json
+            fi
+
+            echo "$json"
+            return
+        fi
+    fi
+
+    butl.fail "Secret ${BUTL_ANSI_UNDERLINE}$name${BUTL_ANSI_RESET_UNDERLINE} not found"
+}
+# BGEN__END /tools/rnchr/lib/rnchr/secret.sh
+
+main() {
+    rnchr_env_args
+    barg.subcommand container cmd_container "Operations on containers"
+    barg.subcommand secret cmd_secret "Operations on secrets"
+    barg.subcommand exec rnchr_container_exec "Executes a command on a remote container"
+
+    local rancher_url=
+    local rancher_access_key=
+    local rancher_secret_key=
+    local rancher_env=
+
+    local subcommand=
+    local subcommand_args=()
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    # Call subcommand if any
+    "$subcommand" \
+        --url "$rancher_url" \
+        --access-key "$rancher_access_key" \
+        --secret-key "$rancher_secret_key" \
+        --env "$rancher_env" \
+        "${subcommand_args[@]}"
+}
+
+cmd_container() {
+    rnchr_env_args
+    barg.subcommand exec rnchr_container_exec "Executes a command on a remote container"
+
+    local rancher_url=
+    local rancher_access_key=
+    local rancher_secret_key=
+    local rancher_env=
+
+    local subcommand=
+    local subcommand_args=()
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    # Call subcommand if any
+    "$subcommand" \
+        --url "$rancher_url" \
+        --access-key "$rancher_access_key" \
+        --secret-key "$rancher_secret_key" \
+        --env "$rancher_env" \
+        "${subcommand_args[@]}"
+}
+
+cmd_secret() {
+    rnchr_env_args
+    barg.subcommand inspect rnchr_secret_get "Prints JSON of the given secret"
+
+    local rancher_url=
+    local rancher_access_key=
+    local rancher_secret_key=
+    local rancher_env=
+
+    local subcommand=
+    local subcommand_args=()
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    # Call subcommand if any
+    "$subcommand" \
+        --url "$rancher_url" \
+        --access-key "$rancher_access_key" \
+        --secret-key "$rancher_secret_key" \
+        --env "$rancher_env" \
+        "${subcommand_args[@]}"
+}
+
+[[ "${BASH_SOURCE+x}" && "${BASH_SOURCE[0]}" != "${0}" ]] || main "$@"

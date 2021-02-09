@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2034
+
+# name of the project
+project_name="rnchr"
+
+# entrypoint function
+entrypoint_func=main
+
+# build dependencies
+build_deps=(
+    "dermoumi/barg"
+    # "dermoumi/butl" # installed as part of barg
+)
