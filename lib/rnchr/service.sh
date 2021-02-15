@@ -547,14 +547,10 @@ rnchr_service_logs() {
 
 rnchr_service_create() {
     _rnchr_env_args
-    barg.arg name \
+    barg.arg stack_service \
         --required \
-        --value=NAME \
-        --desc="Service name"
-    barg.arg stack \
-        --required \
-        --value=STACK \
-        --desc="Stack name"
+        --value=STACK/NAME \
+        --desc="Service and stack names"
     barg.arg launch_config \
         --long=launch-config \
         --value=LAUNCH_CONFIG \
@@ -588,8 +584,7 @@ rnchr_service_create() {
     # shellcheck disable=SC2034
     local rancher_env=
 
-    local name=
-    local stack=
+    local stack_service=
     local launch_config=
     local service_compose_json=
     local scale_override=
@@ -603,6 +598,14 @@ rnchr_service_create() {
     # barg.parse requested an exit
     if ((should_exit)); then
         return "$should_exit_err"
+    fi
+
+    if [[ "$stack_service" =~ \/ ]]; then
+        local stack=${stack_service%%\/*}
+        local service=${stack_service##*\/}
+    else
+        butl.fail "Name should be <STACK_NAME>/<SERVICE_NAME>"
+        return
     fi
 
     local stack_id
@@ -650,24 +653,153 @@ rnchr_service_create() {
     local payload
     payload=$(
         jq -Mnc \
-            --arg name "$name" \
+            --arg name "$service" \
             --argjson scale "$scale" \
             --argjson startOnCreate "$start_on_create" \
             --arg stackId "$stack_id" \
             --argjson launchConfig "$launch_config" \
             '{
-            "type": "service",
-            "name": $name,
-            "scale": $scale,
-            "stackId": $stackId,
-            "startOnCreate": $startOnCreate,
-            "assignServiceIpAddress": false,
-            "launchConfig": $launchConfig,
-            "secondaryLaunchConfigs": []
-        }'
+                "type": "service",
+                "name": $name,
+                "scale": $scale,
+                "stackId": $stackId,
+                "startOnCreate": $startOnCreate,
+                "assignServiceIpAddress": false,
+                "launchConfig": $launchConfig,
+                "secondaryLaunchConfigs": []
+            }'
     ) || return
 
     butl.muffle_all _rnchr_pass_env_args rnchr_env_api /service -X POST -d "$payload" || return
+}
+
+rnchr_service_upgrade() {
+    _rnchr_env_args
+    barg.arg stack_service \
+        --required \
+        --value=STACK/NAME \
+        --desc="Service and stack names"
+    barg.arg launch_config \
+        --long=launch-config \
+        --value=LAUNCH_CONFIG \
+        --desc="Launch config"
+    barg.arg service_compose_json \
+        --long=service-compose-json \
+        --value=SERVICE_COMPOSE \
+        --desc="Service compose JSON"
+    barg.arg stack_compose_json \
+        --long=stack-compose-json \
+        --value=STACK_COMPOSE \
+        --value=SERVICE \
+        --desc="Service from stack compose JSON"
+    barg.arg batch_size_override \
+        --long=batch-size \
+        --value=INTEGER \
+        --desc="How many replacement containers to deploy at a time"
+    barg.arg interval_override \
+        --long=interval \
+        --value=MILLISECONDS \
+        --desc="Time between each container batch deployment"
+    barg.arg no_start_first \
+        --long=no-start-first \
+        --desc="If set, old container will be shut down before the new container starts"
+    barg.arg force_start_first \
+        --long=force-start-first \
+        --desc="If set, forces new container to start before shutting down old containers"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local stack_service=
+    local launch_config=
+    local service_compose_json=
+    local batch_size_override=
+    local interval_override=
+    local no_start_first=
+    local force_start_first=
+    local stack_compose_json=()
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local service_id
+    _rnchr_pass_env_args rnchr_service_get_id --id-var service_id "$stack_service" || return
+
+    local batch_size=1
+    local interval_millis=2000
+    local start_first=false
+
+    if [[ ! "$launch_config" ]]; then
+        if [[ ! "$service_compose_json" ]] && ((${#stack_compose_json[@]} > 0)); then
+            local stack_compose=
+            stack_compose=${stack_compose_json[0]}
+
+            local stack_service=
+            stack_service=${stack_compose_json[1]}
+
+            service_compose_json=$(jq -Mc --arg service "$stack_service" \
+                '.services[$service] | select(. != null)' <<<"$stack_compose") || return
+        fi
+
+        if [[ "$service_compose_json" ]]; then
+            _rnchr_pass_env_args rnchr_service_util_to_launch_config "$service_compose_json" \
+                --config-var launch_config || return
+
+            batch_size=$(jq -Mr '.upgrade_strategy.batch_size // 1' <<<"$service_compose_json") || return
+            interval_millis=$(jq -Mr '.upgrade_strategy.interval_millis // 2000' <<<"$service_compose_json") || return
+            start_first=$(jq -Mr '.upgrade_strategy.start_first // false' <<<"$service_compose_json") || return
+        fi
+    fi
+
+    if [[ ! "$launch_config" ]]; then
+        butl.fail "No service configuration was supplied"
+        return
+    fi
+
+    if [[ "$batch_size_override" ]]; then
+        batch_size=$batch_size_override
+    fi
+
+    if [[ "$interval_override" ]]; then
+        interval_millis=$interval_override
+    fi
+
+    if ((force_start_first)); then
+        start_first=true
+    elif ((no_start_first)); then
+        start_first=false
+    fi
+
+    local payload
+    payload=$(
+        jq -Mnc \
+            --argjson startFirst "$start_first" \
+            --argjson batchSize "$batch_size" \
+            --argjson interval "$interval_millis" \
+            --argjson launchConfig "$launch_config" \
+            '{
+                "inServiceStrategy": {
+                    "batchSize": $batchSize,
+                    "intervalMillis": $interval,
+                    "startFirst": $startFirst,
+                    "launchConfig": $launchConfig
+                }
+            }'
+    ) || return
+
+    butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
+        "/services/$service_id/?action=upgrade" -X POST -d "$payload" || return
 }
 
 rnchr_service_util_to_launch_config() {
