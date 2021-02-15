@@ -803,3 +803,83 @@ rnchr_stack_make_services_upgradable() {
         fi
     fi
 }
+
+rnchr_stack_remove_non_upgradable_services() {
+    _rnchr_env_args
+    barg.arg stack \
+        --required \
+        --value=STACK \
+        --desc="Stack name"
+    barg.arg services \
+        --multi \
+        --value=SERVICE \
+        --desc="Service to watch for"
+    barg.arg await \
+        --short=w \
+        --long=wait \
+        --desc="Wait until the service containers have been stopped"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local stack=
+    local services=()
+    local await=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    butl.log_info "Removing services in non-upgrabale states from stack $stack_name"
+
+    local service_json
+    local service_id
+
+    local stack_services
+    _rnchr_pass_env_args rnchr_stack_get_services "$stack" --services-var stack_services || return
+
+    local target_services=()
+    if ((${#services[@]})); then
+        for service in "${services[@]}"; do
+            service_json=$(jq -Mc --arg service "$service" '.[$service]' <<<"$stack_services") || return
+
+            target_services+=("$service_json")
+        done
+    else
+        butl.split_lines target_services "$(jq -Mc '.[]' <<<"$stack_services")" || return
+    fi
+
+    local non_upgradable_services=()
+    for service_json in "${target_services[@]}"; do
+        local upgrade_link
+        upgrade_link=$(jq -Mr '.actions.upgrade | select(. != null)' <<<"$service_json") || continue
+
+        if [[ ! "$upgrade_link" ]]; then
+            service_id=$(jq -Mr '.id' <<<"$service_json") || return
+
+            local service_name
+            service_name=$(jq -Mr '.name' <<<"$service_json") || return
+
+            butl.log_info "Removing $service_name..."
+            _rnchr_pass_env_args rnchr_service_remove "$service_id" || continue
+
+            non_upgradable_services+=("$service_id")
+        fi
+    done
+
+    if ((${#non_upgradable_services[@]})) && ((await)); then
+        for service_id in "${non_upgradable_services[@]}"; do
+            _rnchr_pass_env_args rnchr_service_wait_for_containers_to_stop "$service_id" || continue
+        done
+    fi
+}
