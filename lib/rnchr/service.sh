@@ -545,6 +545,131 @@ rnchr_service_logs() {
     fi
 }
 
+rnchr_service_create() {
+    _rnchr_env_args
+    barg.arg name \
+        --required \
+        --value=NAME \
+        --desc="Service name"
+    barg.arg stack \
+        --required \
+        --value=STACK \
+        --desc="Stack name"
+    barg.arg launch_config \
+        --long=launch-config \
+        --value=LAUNCH_CONFIG \
+        --desc="Launch config"
+    barg.arg service_compose_json \
+        --long=service-compose-json \
+        --value=SERVICE_COMPOSE \
+        --desc="Service compose JSON"
+    barg.arg stack_compose_json \
+        --long=stack-compose-json \
+        --value=STACK_COMPOSE \
+        --value=SERVICE \
+        --desc="Service from stack compose JSON"
+    barg.arg scale_override \
+        --long=scale \
+        --value=SCALE \
+        --desc="Service scale"
+    barg.arg no_start_on_create \
+        --long=no-start-on-create \
+        --desc="If set, service won't start on creation"
+    barg.arg force_start_on_create \
+        --long=force-start-on-create \
+        --desc="If set, forces service to start on creation"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local name=
+    local stack=
+    local launch_config=
+    local service_compose_json=
+    local scale_override=
+    local no_start_on_create=
+    local force_start_on_create=
+    local stack_compose_json=()
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local stack_id
+    _rnchr_pass_env_args rnchr_stack_get_id --id-var stack_id "$stack" || return
+
+    local scale=1
+    local start_on_create=true
+
+    if [[ ! "$launch_config" ]]; then
+        if [[ ! "$service_compose_json" ]] && ((${#stack_compose_json[@]} > 0)); then
+            local stack_compose=
+            stack_compose=${stack_compose_json[0]}
+
+            local stack_service=
+            stack_service=${stack_compose_json[1]}
+
+            service_compose_json=$(jq -Mc --arg service "$stack_service" \
+                '.services[$service] | select(. != null)' <<<"$stack_compose") || return
+        fi
+
+        if [[ "$service_compose_json" ]]; then
+            _rnchr_pass_env_args rnchr_service_util_to_launch_config "$service_compose_json" \
+                --config-var launch_config || return
+
+            scale=$(jq -Mr '.scale // 1' <<<"$service_compose_json")
+            start_on_create=$(jq -Mr '.start_on_create // true' <<<"$service_compose_json")
+        fi
+    fi
+
+    if [[ ! "$launch_config" ]]; then
+        butl.fail "No service configuration was supplied"
+        return
+    fi
+
+    if [[ "$scale_override" ]]; then
+        scale=$scale_override
+    fi
+
+    if ((force_start_on_create)); then
+        start_on_create=true
+    elif ((no_start_on_create)); then
+        start_on_create=false
+    fi
+
+    local payload
+    payload=$(
+        jq -Mnc \
+            --arg name "$name" \
+            --argjson scale "$scale" \
+            --argjson startOnCreate "$start_on_create" \
+            --arg stackId "$stack_id" \
+            --argjson launchConfig "$launch_config" \
+            '{
+            "type": "service",
+            "name": $name,
+            "scale": $scale,
+            "stackId": $stackId,
+            "startOnCreate": $startOnCreate,
+            "assignServiceIpAddress": false,
+            "launchConfig": $launchConfig,
+            "secondaryLaunchConfigs": []
+        }'
+    ) || return
+
+    butl.muffle_all _rnchr_pass_env_args rnchr_env_api /service -X POST -d "$payload" || return
+}
+
 rnchr_service_util_to_launch_config() {
     _rnchr_env_args
     barg.arg compose \
