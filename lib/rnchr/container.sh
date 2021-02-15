@@ -4,85 +4,316 @@ bgen:import _utils.sh
 bgen:import api.sh
 bgen:import stack.sh
 
-rnchr_container_get_id() {
-    rnchr_env_args
+rnchr_container_get() {
+    _rnchr_env_args
     barg.arg name \
         --required \
         --value=CONTAINER \
         --desc="Container to get the ID of"
+    barg.arg container_var \
+        --long=id-var \
+        --value=variable \
+        --desc="Set the shell variable instead"
 
+    # shellcheck disable=SC2034
     local rancher_url=
+    # shellcheck disable=SC2034
     local rancher_access_key=
+    # shellcheck disable=SC2034
     local rancher_secret_key=
+    # shellcheck disable=SC2034
     local rancher_env=
+
     local name=
+    local container_var=
     barg.parse "$@"
 
-    if [[ "$name" =~ 1i[[:digit:]]+ ]]; then
-        echo "$name"
-        return
-    fi
+    local __container_json=
 
     # If the name contains a slash, assume it's <stack>/<service>
     if [[ "$name" =~ \/ ]]; then
-        local stack_name=${name%%\/*}
-        local service_name=${name##*\/}
+        local containers=
+        rnchr_service_get_containers --containers-var containers "$name" || return
 
-        local r_services=
-        rnchr_stack_get_services \
-            --url "$rancher_url" \
-            --access-key "$rancher_access_key" \
-            --secret-key "$rancher_secret_key" \
-            --env "$rancher_env" \
-            "$stack_name" >/dev/null || return
+        __container_json=$(jq -Mr '.[0] | select(. != null)' <<<"$containers")
+    else
+        local query=
+        if [[ "$name" =~ ^1i[[:digit:]]+ ]]; then
+            query="id=$name"
+        else
+            query="name=$name"
+        fi
 
-        if [[ "$(jq -Mr '. | length' <<<"$r_services")" -gt 0 ]]; then
-            # Select the first of potentially many containers for this service
-            container_id=$(jq -Mr --arg service "$service_name" '
-                .[] | select(.name == $service) | .instanceIds[0] | select(. != null)
-            ' <<<"$r_services")
+        local __response=
+        _rnchr_pass_env_args rnchr_env_api \
+            --response-var __response \
+            "containers" \
+            --get --data-urlencode "$query" || return
 
-            if [[ "$container_id" ]]; then
-                if butl.is_declared r_container_id; then
-                    # shellcheck disable=SC2034
-                    r_container_id=$container_id
-                fi
-
-                echo "$container_id"
-                return
-            fi
+        if [[ "$__response" && "$(jq -Mr '.data | length' <<<"$__response")" -ne 0 ]]; then
+            __container_json=$(jq -Mr '.data[0] | select(. != null)' <<<"$__response")
         fi
     fi
 
-    local r_resp=
-    rnchr_env_api \
-        --url "$rancher_url" \
-        --access-key "$rancher_access_key" \
-        --secret-key "$rancher_secret_key" \
-        --env "$rancher_env" \
-        "containers" \
-        --get --data-urlencode "name=$name" >/dev/null || return
-
-    if [[ "$r_resp" && "$(jq -Mr '.data | length' <<<"$r_resp")" -ne 0 ]]; then
-        local container_id
-        container_id=$(jq -Mr '.data[0].id | select(. != null)' <<<"$r_resp")
-
-        if [[ "$container_id" ]]; then
-            if butl.is_declared r_container_id; then
-                # shellcheck disable=SC2034
-                r_container_id=$container_id
-            fi
-
-            echo "$container_id"
-            return
+    if [[ "$__container_json" ]]; then
+        if [[ "$id_var" ]]; then
+            butl.set_var "$container_var" "$__container_json"
+        else
+            echo "$__container_json"
         fi
+
+        return
     fi
 
     butl.fail "Container ${BUTL_ANSI_UNDERLINE}$name${BUTL_ANSI_RESET_UNDERLINE} not found"
 }
 
+rnchr_container_get_id() {
+    _rnchr_env_args
+    barg.arg name \
+        --required \
+        --value=CONTAINER \
+        --desc="Container to get the ID of"
+    barg.arg id_var \
+        --long=id-var \
+        --value=variable \
+        --desc="Set the shell variable instead"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local name=
+    local id_var=
+    barg.parse "$@"
+
+    local __container_id=
+    if [[ "$name" =~ ^1i[[:digit:]]+ ]]; then
+        __container_id=$name
+    elif [[ "$name" =~ \/ ]]; then
+        local service_json=
+        rnchr_service_get --service-var service_json "$name" || return
+
+        __container_id=$(jq -Mr '.instanceIds[0] | select(. != null)' <<<"$service_json")
+    else
+        local __response=
+        _rnchr_pass_env_args rnchr_env_api \
+            --response-var __response \
+            "containers" \
+            --get --data-urlencode "name=$name" || return
+
+        if [[ "$__response" && "$(jq -Mr '.data | length' <<<"$__response")" -ne 0 ]]; then
+            __container_id=$(jq -Mr '.data[0].id | select(. != null)' <<<"$__response")
+        fi
+    fi
+
+    if [[ "$__container_id" ]]; then
+        if [[ "$id_var" ]]; then
+            butl.set_var "$id_var" "$__container_id"
+        else
+            echo "$__container_id"
+        fi
+
+        return
+    fi
+
+    butl.fail "Container ${BUTL_ANSI_UNDERLINE}$name${BUTL_ANSI_RESET_UNDERLINE} not found"
+}
+
+rnchr_container_list() {
+    _rnchr_env_args
+    barg.arg containers_var \
+        --long=containers-var \
+        --value=variable \
+        --desc="Set the shell variable instead"
+    barg.arg all_containers \
+        --long=all \
+        --short=a \
+        --desc="Show all containers"
+    barg.arg all_running \
+        --long=running \
+        --short=r \
+        --desc="Show containers that are starting or restarting"
+    barg.arg system_containers \
+        --long=system \
+        --short=s \
+        --desc="Show system containers"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local containers_var=
+    local all_containers=
+    local all_running=
+    local system_containers=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local params=(--data-urlencode "limit=-1")
+    if ! ((all_containers)); then
+        if ((all_running)); then
+            params+=(
+                --data-urlencode "state_ne=error"
+                --data-urlencode "state_ne=purged"
+                --data-urlencode "state_ne=removed"
+                --data-urlencode "state_ne=stopped"
+            )
+        else
+            params+=(--data-urlencode "state=running")
+        fi
+    fi
+
+    if ! ((system_containers)); then
+        params+=(--data-urlencode "system=false")
+    fi
+
+    local _response=
+    _rnchr_pass_env_args rnchr_env_api \
+        --response-var _response \
+        "containers" --get \
+        "${params[@]}" || return
+
+    local _containers
+    _containers=$(jq -Mc '.data' <<<"$_response")
+
+    if [[ "$containers_var" ]]; then
+        butl.set_var "$containers_var" "$_containers"
+    else
+        echo "$_containers"
+    fi
+}
+
+rnchr_container_logs() {
+    _rnchr_env_args
+    barg.arg container \
+        --required \
+        --value=CONTAINER \
+        --desc="Container name or container ID"
+    barg.arg lines \
+        --long=lines \
+        --short=n \
+        --value=NUMBER \
+        --default=50 \
+        --desc="Number of lines to show"
+    barg.arg since \
+        --long=since \
+        --short=s \
+        --value=TIMESTAMP \
+        --desc="Show longs since timestamp"
+    barg.arg follow \
+        --long=follow \
+        --short=f \
+        --desc="If set, follows container logs"
+    barg.arg timestamps \
+        --long=timestamps \
+        --short=t \
+        --desc="If set, also shows timestamps"
+    barg.arg raw \
+        --long=raw \
+        --desc="Do not preprocess rancher output"
+    barg.arg colorize_stderr \
+        --long=distinct-stderr \
+        --desc="Colorize stderr in red"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local container=
+    local lines=
+    local follow=
+    local since=
+    local timestamps=
+    local raw=
+    local colorize_stderr=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local container_id=
+    _rnchr_pass_env_args rnchr_container_get_id \
+        --id-var container_id "$container" || return
+
+    local payload
+    payload=$(jq -Mnc '{
+        "follow": false,
+        "lines": 100,
+        "since": "",
+        "timestamps": false
+    }')
+
+    if [[ "$lines" ]]; then
+        payload=$(jq -Mc --argjson linecount "$lines" '.lines = $linecount' <<<"$payload") || return
+    fi
+
+    if [[ "$follow" ]]; then
+        payload=$(jq -Mc '.follow = true' <<<"$payload") || return
+    fi
+
+    if [[ "$since" ]]; then
+        since=$(jq -Mc --arg ts "$since" '.since = $ts' <<<"$payload") || return
+    fi
+
+    if [[ "$timestamps" ]]; then
+        timestamps=$(jq -Mc '.timestamps = true' <<<"$payload") || return
+    fi
+
+    local response=
+    _rnchr_pass_env_args rnchr_env_api \
+        --response-var response \
+        "containers/$container_id/?action=logs" \
+        -X POST -d "$payload" || return
+
+    local token
+    token=$(jq -Mr '.token' <<<"$response") || return
+
+    local url
+    url=$(jq -Mr '.url' <<<"$response") || return
+
+    if ((raw)); then
+        : | websocat -n "${url}?token=${token}" 2>/dev/null || true
+    else
+        while read -r line; do
+            if [[ "${line::2}" == "01" ]]; then
+                echo -e "${line:3}" >&1
+            elif ((colorize_stderr)); then
+                echo -e "${BUTL_ANSI_BRRED}${line:3}${BUTL_ANSI_RESET}" >&2
+            else
+                echo -e "${line:3}" >&2
+            fi
+        done < <(: | websocat -n "${url}?token=${token}" 2>/dev/null || true)
+    fi
+}
+
 rnchr_container_exec() {
-    rnchr_env_args
+    _rnchr_env_args
     barg.arg container \
         --required \
         --value=CONTAINER \
@@ -94,61 +325,75 @@ rnchr_container_exec() {
         --allow-dash \
         --desc="Commands to execute"
 
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
     local command=()
     local container=
-    local rancher_url=
-    local rancher_access_key=
-    local rancher_secret_key=
-    local rancher_env=
+
+    local should_exit=
+    local should_exit_err=0
     barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
 
     if ! ((${#command[@]})); then
         return 0
     fi
 
-    local r_container_id=
-    rnchr_container_get_id "$container" >/dev/null || return
+    local container_id=
+    _rnchr_pass_env_args rnchr_container_get_id \
+        --id-var container_id "$container" || return
 
     local stdout_marker="__STDOUT_${RANDOM}__"
     local stderr_marker="__STDERR_${RANDOM}__"
 
+    local cmd=
+    cmd=$(printf '%q ' "${command[@]}")
+
     local cmd_wrapper="
         tmp=\$(mktemp -d)
-        (${command[*]}) 1>\"\$tmp/stdout\" 2>\"\$tmp/stderr\"
+        ($cmd) 1>\"\$tmp/stdout\" 2>\"\$tmp/stderr\"
         err=\$?
         cat \"\$tmp/stdout\"
         printf \"$stdout_marker\"
         cat \"\$tmp/stderr\"
         printf \"$stderr_marker\"
         echo \$err
-        rm -rf \"\$tmp\"
+        rm -r \"\$tmp\"
     "
 
     local query
     query=$(jq --arg cmd "$cmd_wrapper" -Mnc '{
-        "attachStdin":false,
-        "attachStdout":true,
-        "command":["bash", "-c", $cmd],
-        "tty":false}
-    ')
+        "attachStdin": false,
+        "attachStdout": true,
+        "command": ["bash", "-c", $cmd],
+        "tty": false
+    }') || return
 
-    local r_resp=
-    rnchr_env_api \
-        --url "$rancher_url" \
-        --access-key "$rancher_access_key" \
-        --secret-key "$rancher_secret_key" \
-        --env "$rancher_env" \
-        "containers/$r_container_id/?action=execute" \
-        -X POST -d "$query" >/dev/null || return
+    local response=
+    _rnchr_pass_env_args rnchr_env_api \
+        --response-var response \
+        "containers/$container_id/?action=execute" \
+        -X POST -d "$query" || return
 
     local token
-    token=$(jq -Mr '.token' <<<"$r_resp")
+    token=$(jq -Mr '.token' <<<"$response") || return
 
     local url
-    url=$(jq -Mr '.url' <<<"$r_resp")
+    url=$(jq -Mr '.url' <<<"$response") || return
 
     local output
-    output=$(websocat -E "${url}?token=${token}" | base64 -d | tr -d '\0')
+    output=$(: | websocat -n "${url}?token=${token}") || return
+    output=$(base64 -d <<<"$output" | tr -d '\0') || return
 
     : "${output%%"${stdout_marker}"*}"
     : "${_#$'\x01\x01'?}"
@@ -157,7 +402,6 @@ rnchr_container_exec() {
     local stdout=${_%[[:space:]]}
     if [[ "$stdout" =~ [^[:cntrl:]] ]]; then
         printf '%b\n' "$stdout"
-        # printf '%b\n' "$(cat -etv <<<"$stdout")"
     fi
 
     : "${output##*"${stdout_marker}"}"
@@ -170,5 +414,12 @@ rnchr_container_exec() {
         printf '%b\n' "$stderr" >&2
     fi
 
-    return "${output##*"${stderr_marker}"}"
+    : "${output##*"${stderr_marker}"}"
+    local rc="${_//[![:digit:]]/}"
+
+    if [[ ! "$rc" ]]; then
+        return 1
+    else
+        return "$rc"
+    fi
 }

@@ -4,83 +4,64 @@ __rnchr_last_env_name="__@_NOT_AN_ENV_NAME__"
 __rnchr_last_env_id=
 
 rnchr_env_get_id() {
-    rnchr_args
+    _rnchr_args
     barg.arg environment \
         --required \
         --value=environment \
         --desc="Environment name"
+    barg.arg id_var \
+        --long=id-var \
+        --value=variable \
+        --desc="Set the shell variable instead"
 
+    # shellcheck disable=SC2034
     local rancher_url=
+    # shellcheck disable=SC2034
     local rancher_access_key=
+    # shellcheck disable=SC2034
     local rancher_secret_key=
+
     local environment=
+    local id_var=
     barg.parse "$@"
 
+    local env_id=
     if [[ "$environment" == "$__rnchr_last_env_name" ]]; then
-        if butl.is_declared r_env_id; then
-            r_env_id=$__rnchr_last_env_id
-        fi
+        env_id=$__rnchr_last_env_id
+    elif [[ ! "$environment" ]]; then
+        local response=
+        _rnchr_pass_args rnchr_api \
+            --response-var response \
+            "userpreferences?name=defaultProjectId" || return
 
-        echo "$__rnchr_last_env_id"
+        local env_id_json
+        env_id_json=$(jq -Mr '.data[0].value | select(. != null)' <<<"$response")
+
+        env_id=$(jq --argjson env "$env_id_json" -Mrn '$env')
+    elif [[ "$environment" =~ 1a[[:digit:]]+ ]]; then
+        env_id=$environment
+    else
+        local response=
+        _rnchr_pass_args rnchr_api \
+            "projects/" \
+            --response-var response \
+            --get --data-urlencode "name=$environment" || return
+
+        if [[ "$response" && "$(jq -Mr '.data | length' <<<"$response")" -ne 0 ]]; then
+            env_id=$(jq -Mr '.data[0].id | select(. != null)' <<<"$response")
+        fi
+    fi
+
+    if [[ ! "$env_id" ]]; then
+        butl.fail "Environment $environment not found"
         return
     fi
 
-    if [[ ! "$environment" ]]; then
-        local r_resp=
-        rnchr_api \
-            --url "$rancher_url" \
-            --access-key "$rancher_access_key" \
-            --secret-key "$rancher_secret_key" \
-            "userpreferences?name=defaultProjectId" >/dev/null || return
-
-        local default_env_id
-        default_env_id=$(jq -Mr '.data[0].value | select(. | null)' <<<"$r_resp")
-
-        local env_id=
-        env_id=$(jq --argjson env "$default_env_id" -Mrn '$env')
-
-        if [[ "$env_id" ]]; then
-            __rnchr_last_env_name=$environment
-            __rnchr_last_env_id=$env_id
-
-            if butl.is_declared r_env_id; then
-                r_env_id=$env_id
-            fi
-
-            echo "$env_id"
-            return
-        fi
+    __rnchr_last_env_name=$environment
+    __rnchr_last_env_id=$env_id
+    if [[ "$id_var" ]]; then
+        butl.set_var "$id_var" "$env_id"
+    else
+        echo "$env_id"
     fi
-
-    if [[ "$environment" =~ 1a[[:digit:]]+ ]]; then
-        echo "$environment"
-        return
-    fi
-
-    local r_resp=
-    rnchr_api \
-        --url "$rancher_url" \
-        --access-key "$rancher_access_key" \
-        --secret-key "$rancher_secret_key" \
-        "projects/" \
-        --get --data-urlencode "name=$environment" >/dev/null || return
-
-    if [[ "$r_resp" && "$(jq -Mr '.data | length' <<<"$r_resp")" -ne 0 ]]; then
-        local env_id=
-        env_id=$(jq -Mr '.data[0].id | select(. != null)' <<<"$r_resp")
-
-        if [[ "$env_id" ]]; then
-            __rnchr_last_env_name=$environment
-            __rnchr_last_env_id=$env_id
-
-            if butl.is_declared r_env_id; then
-                r_env_id=$env_id
-            fi
-
-            echo "$env_id"
-            return
-        fi
-    fi
-
-    butl.fail "Environment $environment not found"
 }

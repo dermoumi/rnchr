@@ -5,18 +5,59 @@ bgen:import butl/muffle
 bgen:import _utils.sh
 bgen:import api.sh
 
+rnchr_secret_list() {
+    _rnchr_env_args
+    barg.arg secrets_var \
+        --long=secrets-var \
+        --value=variable \
+        --desc="Set the shell variable instead"
+
+    local rancher_url=
+    local rancher_access_key=
+    local rancher_secret_key=
+    local rancher_env=
+    local secrets_var=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local response=
+    _rnchr_pass_env_args rnchr_env_api \
+        --response-var response \
+        "secrets" --get --data-urlencode "$query" || return
+
+    local _output=
+    _output=$(jq -Mc '.data' <<<"$response") || return
+
+    if [[ "$secrets_var" ]]; then
+        butl.set_var "$secret_var" "$_output"
+    else
+        echo "$_output"
+    fi
+}
+
 rnchr_secret_get() {
-    rnchr_env_args
+    _rnchr_env_args
     barg.arg name \
         --required \
         --value=SECRET \
         --desc="Secret to inspect"
+    barg.arg secret_var \
+        --long=secret-var \
+        --value=variable \
+        --desc="Set the shell variable instead"
 
     local rancher_url=
     local rancher_access_key=
     local rancher_secret_key=
     local rancher_env=
     local name=
+    local secret_var=
 
     local should_exit=
     local should_exit_err=0
@@ -33,25 +74,22 @@ rnchr_secret_get() {
         query="name=$name"
     fi
 
-    local r_resp=
-    rnchr_env_api \
-        --url "$rancher_url" \
-        --access-key "$rancher_access_key" \
-        --secret-key "$rancher_secret_key" \
-        --env "$rancher_env" \
-        "secrets" --get --data-urlencode "$query" >/dev/null || return
+    local response=
+    _rnchr_pass_env_args rnchr_env_api \
+        --response-var response \
+        "secrets" --get --data-urlencode "$query" || return
 
-    if [[ "$r_resp" && "$(jq -Mr '.data | length' <<<"$r_resp")" -gt 0 ]]; then
+    if [[ "$response" && "$(jq -Mr '.data | length' <<<"$response")" -gt 0 ]]; then
         local json
-        json=$(jq -Mc '.data[0] | select(. != null)' <<<"$r_resp") || return
+        json=$(jq -Mc '.data[0] | select(. != null)' <<<"$response") || return
 
         if [[ "$json" ]]; then
-            if butl.is_declared r_secret; then
-                # shellcheck disable=SC2034
-                r_secret=$json
+            if [[ "$secret_var" ]]; then
+                butl.set_var "$secret_var" "$json"
+            else
+                echo "$json"
             fi
 
-            echo "$json"
             return
         fi
     fi
@@ -60,17 +98,22 @@ rnchr_secret_get() {
 }
 
 rnchr_secret_get_id() {
-    rnchr_env_args
+    _rnchr_env_args
     barg.arg name \
         --required \
         --value=SECRET \
         --desc="Secret to inspect"
+    barg.arg id_var \
+        --long=id-var \
+        --value=variable \
+        --desc="Set the shell variable instead"
 
     local rancher_url=
     local rancher_access_key=
     local rancher_secret_key=
     local rancher_env=
     local name=
+    local id_var=
 
     local should_exit=
     local should_exit_err=0
@@ -84,28 +127,25 @@ rnchr_secret_get_id() {
     if [[ "$name" =~ 1se[[:digit:]]+ ]]; then
         secret_id=$name
     else
-        local r_secret=
-        rnchr_secret_get \
-            --url="$rancher_url" \
-            --access-key="$rancher_access_key" \
-            --secret-key="$rancher_secret_key" \
-            --env="$rancher_env" \
-            "$name" >/dev/null || return
+        local secret=
+        _rnchr_pass_env_args rnchr_secret_get \
+            --secret-var secret \
+            "$name" || return
 
-        secret_id=$(jq -Mr .id <<<"$r_secret")
+        secret_id=$(jq -Mr '.id' <<<"$secret")
     fi
 
-    if butl.is_declared r_secret_id; then
-        # shellcheck disable=SC2034
-        r_secret_id=$secret_id
+    if [[ "$id_var" ]]; then
+        butl.set_var "$id_var" "$secret_id"
+    else
+        echo "$secret_id"
     fi
 
-    echo "$secret_id"
     return
 }
 
 rnchr_secret_create() {
-    rnchr_env_args
+    _rnchr_env_args
     barg.arg name \
         --required \
         --value=NAME \
@@ -173,16 +213,12 @@ rnchr_secret_create() {
             "description": $desc
         }') || return
 
-    butl.muffle_all rnchr_env_api \
-        --url="$rancher_url" \
-        --access-key="$rancher_access_key" \
-        --secret-key="$rancher_secret_key" \
-        --env="$rancher_env" \
+    butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
         "secrets" -X POST -d "$payload"
 }
 
 rnchr_secret_delete() {
-    rnchr_env_args
+    _rnchr_env_args
     barg.arg name \
         --required \
         --value=NAME \
@@ -202,19 +238,15 @@ rnchr_secret_delete() {
         return "$should_exit_err"
     fi
 
-    local r_secret_id=
-    rnchr_secret_get_id "$name" >/dev/null || return
+    local secret_id=
+    rnchr_secret_get_id "$name" --id-var secret_id || return
 
-    butl.muffle_all rnchr_env_api \
-        --url="$rancher_url" \
-        --access-key="$rancher_access_key" \
-        --secret-key="$rancher_secret_key" \
-        --env="$rancher_env" \
-        "secrets/$r_secret_id" -X DELETE
+    butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
+        "secrets/$secret_id" -X DELETE
 }
 
 rnchr_secret_sync() {
-    rnchr_env_args
+    _rnchr_env_args
     barg.arg file \
         --required \
         --value=FILE \
@@ -255,43 +287,35 @@ rnchr_secret_sync() {
 
             local value=${!env_var}
 
-            local r_hash=
-            __rnchr_secret_get_hash "$value" >/dev/null
+            local hash=
+            __rnchr_secret_get_hash "$value" hash >/dev/null
 
-            local r_secret_desc=
-            local r_secret_remote_hash=
+            local secret_desc=
+            local remote_hash=
             __rnchr_secret_get_remote_hash \
+                secret_desc \
+                remote_hash \
                 --url="$rancher_url" \
                 --access-key="$rancher_access_key" \
                 --secret-key="$rancher_secret_key" \
                 --env="$rancher_env" \
                 "$env_var" >/dev/null 2>/dev/null || true
 
-            if [[ "$r_secret_remote_hash" != "$r_hash" ]]; then
+            if [[ "$remote_hash" != "$hash" ]]; then
                 butl.log_debug "Removing $env_var"
                 local secret_id=
-                if rnchr_secret_exists \
-                    --url="$rancher_url" \
-                    --access-key="$rancher_access_key" \
-                    --secret-key="$rancher_secret_key" \
-                    --env="$rancher_env" \
-                    "$env_var"; then
-                    rnchr_secret_delete \
-                        --url="$rancher_url" \
-                        --access-key="$rancher_access_key" \
-                        --secret-key="$rancher_secret_key" \
-                        --env="$rancher_env" \
-                        "$env_var" || return
+                if _rnchr_pass_env_args rnchr_secret_exists "$env_var"; then
+                    _rnchr_pass_env_args rnchr_secret_delete "$env_var" || return
                 fi
 
                 local desc=
-                if [[ "$r_secret_remote_hash" ]]; then
-                    desc=${r_secret_desc//$r_secret_remote_hash/$r_hash}
+                if [[ "$remote_hash" ]]; then
+                    desc=${secret_desc//$remote_hash/$hash}
                 else
-                    if [[ "$r_secret_desc" =~ [^[:space]] ]]; then
+                    if [[ "$secret_desc" =~ [^[:space]] ]]; then
                         desc+=$'\n'
                     fi
-                    desc+="sha256:$r_hash"
+                    desc+="sha256:$hash"
                 fi
 
                 butl.log_debug "Creating $env_var with desc: $desc"
@@ -308,51 +332,75 @@ rnchr_secret_sync() {
 
 # Returns the sha256 hash for a given string
 __rnchr_secret_get_hash() {
-    local str=$1
+    local _str=$1
+    local _variable=${2:-}
 
-    local output
-    output=$(printf '%s' "$str" | sha256sum)
+    local _output
+    _output=$(printf '%s' "$_str" | sha256sum)
 
-    local hash=${output%%[[:space:]]*}
+    local _hash=${_output%%[[:space:]]*}
 
-    if butl.is_declared r_hash; then
-        # shellcheck disable=SC2034
-        r_hash=$hash
+    if [[ "$_variable" ]]; then
+        butl.set_var "$_variable" "$_hash"
+    else
+        echo "$_hash"
     fi
-
-    echo "$hash"
 }
 
 # Gets the hash from Rancher's secret description
 __rnchr_secret_get_remote_hash() {
-    local r_secret=
-    rnchr_secret_get "$@" >/dev/null || return
+    local _secret_desc_var=$1
+    local _remote_hash_var=$2
+    shift 2
 
-    local desc=
-    desc=$(jq -Mr '.description' <<<"$r_secret") || return
+    local _secret=
+    rnchr_secret_get --secret-var _secret "$@" || return
 
-    if [[ "$desc" =~ .*sha256:([[:xdigit:]]+) ]]; then
-        local hash=${BASH_REMATCH[1]}
+    local _desc=
+    _desc=$(jq -Mr '.description' <<<"$_secret") || return
 
-        # Set the hash to the remote_hash variable if it's previously declared
-        if butl.is_declared r_secret_remote_hash; then
-            # shellcheck disable=SC2034
-            r_secret_remote_hash=$hash
-        fi
-
-        # Set the hash to the remote_hash variable if it's previously declared
-        if butl.is_declared r_secret_desc; then
-            # shellcheck disable=SC2034
-            r_secret_desc=$desc
-        fi
-
-        echo "$hash"
+    if [[ "$_desc" =~ .*sha256:([[:xdigit:]]+) ]]; then
+        local _hash=${BASH_REMATCH[1]}
+        butl.set_var "$_remote_hash_var" "$_hash"
+        butl.set_var "$_secret_desc_var" "$_desc"
+        return 0
     fi
+
+    return 1
 }
 
 rnchr_secret_exists() {
-    local r_secret=
-    rnchr_secret_get "$@" >/dev/null 2>/dev/null || true
+    _rnchr_env_args
+    barg.arg name \
+        --required \
+        --value=SECRET \
+        --desc="Secret to inspect"
 
-    [[ "$r_secret" ]]
+    local rancher_url=
+    local rancher_access_key=
+    local rancher_secret_key=
+    local rancher_env=
+    local name=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local id_field=
+    if [[ "$name" =~ 1se[[:digit:]]+ ]]; then
+        id_field="id"
+    else
+        id_field="name"
+    fi
+
+    local response=
+    _rnchr_pass_env_args rnchr_env_api \
+        --response_var response \
+        "secrets" --get --data-urlencode "$id_field=$name" >/dev/null || return
+
+    [[ "$response" && "$(jq -Mr --arg field "$id_field" '.data[0][$field] | select(. != null)' <<<"$response")" ]]
 }
