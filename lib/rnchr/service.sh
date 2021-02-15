@@ -872,15 +872,52 @@ rnchr_service_upgrade() {
     fi
 
     if ((finish_upgrade)); then
-        if [[ "$finish_upgrade_timeout" ]]; then
-            butl.timeout "$finish_upgrade_timeout" \
-                _rnchr_pass_env_args rnchr_service_wait_for_action "$service_id" finishupgrade || return
-        else
-            _rnchr_pass_env_args rnchr_service_wait_for_action "$service_id" finishupgrade || return
-        fi
-
-        _rnchr_pass_env_args rnchr_service_make_upgradable "$service_id" || return
+        _rnchr_pass_env_args rnchr_service_finish_upgrade "$service_id" --timeout="$finish_upgrade_timeout" || return
     fi
+}
+
+rnchr_service_finish_upgrade() {
+    _rnchr_env_args
+    barg.arg stack_service \
+        --required \
+        --value=STACK/NAME \
+        --desc="Service and stack names"
+    barg.arg timeout \
+        --long=timeout \
+        --value=SECONDS \
+        --desc="Finishes upgrade but fails if exceeds given time"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local stack_service=
+    local timeout=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local service_id
+    _rnchr_pass_env_args rnchr_service_get_id --id-var service_id "$stack_service" || return
+
+    if [[ "$timeout" ]] && ! _rnchr_pass_env_args rnchr_service_has_action "$service_id" upgrade; then
+        butl.timeout "$timeout" \
+            _rnchr_pass_env_args rnchr_service_wait_for_action "$service_id" finishupgrade || return
+    else
+        _rnchr_pass_env_args rnchr_service_wait_for_action "$service_id" finishupgrade || return
+    fi
+
+    _rnchr_pass_env_args rnchr_service_make_upgradable "$service_id" || return
 }
 
 rnchr_service_update_links() {
@@ -1081,6 +1118,47 @@ rnchr_service_update_links() {
     fi
 }
 
+rnchr_service_has_action() {
+    _rnchr_env_args
+    barg.arg service \
+        --required \
+        --value=SERVICE \
+        --desc="Service ID or <STACK>/<NAME>"
+    barg.arg action \
+        --required \
+        --value=ACTION \
+        --desc="Action to wait for for"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local service=
+    local action=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local service_json=
+    _rnchr_pass_env_args rnchr_service_get --service-var service_json "$service" || return
+
+    local endpoint=
+    endpoint=$(jq -Mr --arg action "$action" \
+        '.actions[$action] | select(. != null)' <<<"$service_json") || return
+
+    [[ "$endpoint" ]]
+}
+
 rnchr_service_wait_for_action() {
     _rnchr_env_args
     barg.arg service \
@@ -1114,19 +1192,10 @@ rnchr_service_wait_for_action() {
 
     butl.log_debug "Waiting for service $service to have action $action"
 
-    while true; do
-        local service_json=
-        _rnchr_pass_env_args rnchr_service_get --service-var service_json "$service" || return
+    local service_id=
+    _rnchr_pass_env_args rnchr_service_get_id --id-var service_id "$service" || return
 
-        local endpoint=
-        endpoint=$(jq -Mr --arg action "$action" \
-            '.actions[$action] | select(. != null)' <<<"$service_json") || return
-
-        # If endpoint is available, print it and break from loop
-        if [[ "$endpoint" ]]; then
-            break
-        fi
-
+    while ! _rnchr_pass_env_args rnchr_service_has_action "$service_id" "$action"; do
         # Wait for 1 seconds before trying again
         sleep 1
     done

@@ -748,6 +748,20 @@ rnchr_stack_make_services_upgradable() {
     fi
 
     local service_count=${#services[@]}
+    if ! ((service_count)); then
+        local stack_services
+        _rnchr_pass_env_args rnchr_stack_get_services "$stack" --services-var stack_services || return
+
+        local services_lines
+        services_lines=$(jq -Mr '.[] | .name' <<<"$stack_services") || return
+
+        if [[ ! "$services_lines" ]]; then
+            return
+        fi
+
+        butl.split_lines services "$services_lines"
+    fi
+
     if ((service_count == 1)); then
         local service=${services[0]}
 
@@ -759,7 +773,7 @@ rnchr_stack_make_services_upgradable() {
 
         # shellcheck disable=SC2086
         _rnchr_pass_env_args rnchr_service_make_upgradable "$stack/$service" $args || return
-    elif ((service_count > 1)); then
+    else
         local stack_services
         _rnchr_pass_env_args rnchr_stack_get_services "$stack" --services-var stack_services || return
 
@@ -840,7 +854,7 @@ rnchr_stack_remove_non_upgradable_services() {
         return "$should_exit_err"
     fi
 
-    butl.log_info "Removing services in non-upgrabale states from stack $stack_name"
+    butl.log_info "Removing services in non-upgrabale states from stack $stack"
 
     local service_json
     local service_id
@@ -881,5 +895,105 @@ rnchr_stack_remove_non_upgradable_services() {
         for service_id in "${non_upgradable_services[@]}"; do
             _rnchr_pass_env_args rnchr_service_wait_for_containers_to_stop "$service_id" || continue
         done
+    fi
+}
+
+rnchr_stack_upgrade_services() {
+    _rnchr_env_args
+    barg.arg stack \
+        --required \
+        --value=STACK \
+        --desc="Stack name"
+    barg.arg services \
+        --multi \
+        --value=SERVICE \
+        --desc="Service to watch for"
+    barg.arg compose_json \
+        --long=compose-json \
+        --value=JSON \
+        --desc="Stack compose JSON"
+    barg.arg finish_upgrade \
+        --long=finish-upgrade \
+        --desc="Finishes upgrade"
+    barg.arg finish_upgrade_timeout \
+        --implies=finish_upgrade \
+        --long=finish-upgrade-timeout \
+        --value=SECONDS \
+        --desc="Finishes upgrade but fails if exceeds given time"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local stack=
+    local services=()
+    local compose_json=
+    local finish_upgrade=
+    local finish_upgrade_timeout=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    if ((${#services[@]} == 0)); then
+        local services_lines
+        services_lines=$(jq -Mr '.services | to_entries[] | .key' <<<"$compose_json") || return
+
+        if [[ ! "$services_lines" ]]; then
+            return
+        fi
+
+        butl.split_lines services "$services_lines"
+    fi
+
+    butl.log_info "Upgrading $stack services: $(butl.join_by ' ' "${services[@]}")"
+
+    local stack_services
+    _rnchr_pass_env_args rnchr_stack_get_services "$stack" --services-var stack_services || return
+
+    local service
+    local service_id
+    local service_ids=()
+    local co_run_commands=()
+    for service in "${services[@]}"; do
+        local service_id
+        service_id=$(jq -Mr --arg name "$service" '.[] | select(.name == $name) | .id' <<<"$stack_services") || return
+
+        if [[ ! "$service_id" ]]; then
+            butl.fail "Service $stack/$service does not exist"
+            return
+        fi
+        service_ids+=("$service_id")
+
+        co_run_commands+=("$(
+            printf '%q ' _rnchr_pass_env_args rnchr_service_upgrade "$service_id" \
+                --stack-compose-json "$compose_json" "$service"
+        )")
+    done
+
+    # shellcheck disable=SC2034
+    local result=()
+
+    butl.co_run result "${co_run_commands[@]}" || return
+
+    if ((finish_upgrade)); then
+        co_run_commands=()
+        for service_id in "${service_ids[@]}"; do
+            co_run_commands+=("$(
+                printf '%q ' _rnchr_pass_env_args rnchr_service_finish_upgrade "$service_id" \
+                    --timeout="$finish_upgrade_timeout"
+            )")
+        done
+
+        butl.co_run result "${co_run_commands[@]}" || return
     fi
 }
