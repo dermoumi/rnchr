@@ -38,7 +38,7 @@ rnchr_env_get_id() {
         env_id_json=$(jq -Mr '.data[0].value | select(. != null)' <<<"$response")
 
         env_id=$(jq --argjson env "$env_id_json" -Mrn '$env')
-    elif [[ "$environment" =~ 1a[[:digit:]]+ ]]; then
+    elif [[ "$environment" =~ ^1a[[:digit:]]+ ]]; then
         env_id=$environment
     else
         local response=

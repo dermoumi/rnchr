@@ -148,6 +148,10 @@ rnchr_handle_err() {
             butl.fail "$_ contains invalid characters"
             return
             ;;
+        ActionNotAvailable)
+            butl.fail "API error ($status): Action not available"
+            return
+            ;;
         esac
 
         if [[ "$message" ]]; then

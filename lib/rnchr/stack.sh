@@ -78,7 +78,7 @@ rnchr_stack_get() {
 
     local query=
     if [[ "$name" =~ ^1st[[:digit:]]+ ]]; then
-        query="id=$name"
+        query="id=${name#1st}"
     else
         query="name=$name"
     fi
@@ -535,25 +535,25 @@ rnchr_stack_exists() {
         return "$should_exit_err"
     fi
 
-    local id_field=
+    local query=
     if [[ "$name" =~ ^1st[[:digit:]]+ ]]; then
-        id_field="id"
+        query="id=${name#1st}"
     else
-        id_field="name"
+        query="name=$name"
     fi
 
     local response=
     _rnchr_pass_env_args rnchr_env_api \
         --response-var response \
-        "stacks" --get --data-urlencode "$id_field=$name" || return
+        "stacks" --get --data-urlencode "$query" || return
 
-    [[ "$response" && "$(jq -Mr --arg field "$id_field" '.data[0][$field] | select(. != null)' <<<"$response")" ]]
+    [[ "$response" && "$(jq -Mr '.data[0] | select(. != null)' <<<"$response")" ]]
 }
 
 rnchr_stack_wait_for_containers_to_stop() {
     local stack_name=$1
 
-    if [[ "$stack_name" =~ 1st[[:digit:]]+ ]]; then
+    if [[ "$stack_name" =~ ^1st[[:digit:]]+ ]]; then
         : "Called rnchr_stack_wait_for_containers_to_stop using a stack ID."
         butl.log_warning "$_ Please use a stack name for reliable results"
     fi
@@ -673,23 +673,7 @@ rnchr_stack_wait_for_service_action() {
     local service_count=${#services[@]}
     if ((service_count == 1)); then
         local service=${services[0]}
-
-        while true; do
-            local service_json=
-            _rnchr_pass_env_args rnchr_service_get --service-var service_json "$stack/$service" || return
-
-            local endpoint=
-            endpoint=$(jq -Mr --arg action "$action" \
-                '.actions[$action] | select(. != null)' <<<"$service_json") || return
-
-            # If endpoint is available, print it and break from loop
-            if [[ "$endpoint" ]]; then
-                break
-            fi
-
-            # Wait for 1 seconds before trying again
-            sleep 1
-        done
+        _rnchr_pass_env_args rnchr_service_wait_for_action "$stack/$service" "$action" || return
     elif ((service_count > 1)); then
         while true; do
             local services_json=
@@ -737,6 +721,10 @@ rnchr_stack_make_services_upgradable() {
         --multi \
         --value=SERVICE \
         --desc="Service to watch for"
+    barg.arg await \
+        --short=w \
+        --long=wait \
+        --desc="Wait for service to be in an upgradable state"
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -749,6 +737,7 @@ rnchr_stack_make_services_upgradable() {
 
     local stack=
     local services=()
+    local await=
 
     local should_exit=
     local should_exit_err=0
@@ -761,29 +750,15 @@ rnchr_stack_make_services_upgradable() {
     local service_count=${#services[@]}
     if ((service_count == 1)); then
         local service=${services[0]}
-        butl.log_debug "Making $stack/$service reach an upgradable state"
 
-        local service_json=
-        _rnchr_pass_env_args rnchr_service_get --service-var service_json "$stack/$service" || return
-
-        local endpoint=
-        local action_endpoint=
-        for action in finishupgrade rollback; do
-            endpoint=$(jq -Mr --arg action "$action" \
-                '.actions[$action] | select(. != null)' <<<"$service_json") || return
-
-            if [[ "$endpoint" ]]; then
-                action_endpoint=$endpoint
-                : "Service ${BUTL_ANSI_UNDERLINE}$service${BUTL_ANSI_RESET_UNDERLINE}"
-                butl.log_debug "$_ pending $action..."
-                break
-            fi
-        done
-
-        if [[ "$action_endpoint" ]]; then
-            butl.muffle_all rnchr_env_api "$action_endpoint" -X POST || return
-            _rnchr_pass_env_args rnchr_stack_wait_for_service_action "$stack" upgrade "$service" || return
+        if ((await)); then
+            local args="--wait"
+        else
+            local args=''
         fi
+
+        # shellcheck disable=SC2086
+        _rnchr_pass_env_args rnchr_service_make_upgradable "$stack/$service" $args || return
     elif ((service_count > 1)); then
         local stack_services
         _rnchr_pass_env_args rnchr_stack_get_services "$stack" --services-var stack_services || return
@@ -822,7 +797,7 @@ rnchr_stack_make_services_upgradable() {
             fi
         done
 
-        if ((${#services_awaiting[@]})); then
+        if ((${#services_awaiting[@]})) && ((await)); then
             _rnchr_pass_env_args rnchr_stack_wait_for_service_action \
                 "$stack" upgrade "${services_awaiting[@]}" || return
         fi

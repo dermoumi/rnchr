@@ -67,13 +67,14 @@ rnchr_service_get() {
     barg.parse "$@"
 
     # If the name contains a slash, assume it's <stack>/<service>
+    local _service_json=
     if [[ "$_service" =~ \/ ]]; then
         local stack_name=${_service%%\/*}
         local service_name=${_service##*\/}
 
         local query=
         if [[ "$service_name" =~ ^1s[[:digit:]]+ ]]; then
-            query="id=$service_name"
+            query="id=${service_name#1s}"
         else
             query="name=$service_name"
         fi
@@ -88,44 +89,33 @@ rnchr_service_get() {
             "_rnchr_pass_env_args rnchr_stack_get_id '$stack_name'" || return
 
         local _stack_id=${_json_map[1]}
-        local _service_json=
         _service_json=$(jq -Mc --arg stackId "$_stack_id" \
             '.data[] | select(.stackId == $stackId)' <<<"${_json_map[0]}")
-
-        if [[ "$_service_json" ]]; then
-            if [[ "$service_var" ]]; then
-                butl.set_var "$service_var" "$_service_json"
-            else
-                echo "$_service_json"
-            fi
-
-            return
-        fi
     elif [[ "$_service" =~ ^1s[[:digit:]]+ ]]; then
         local _services_json=
         _rnchr_pass_env_args rnchr_env_api \
             --response-var _services_json \
             "services" --get \
-            --data-urlencode "id=$_service" \
+            --data-urlencode "id=${_service#1s}" \
             --data-urlencode "limit=-1" || return
 
         if [[ "$_services_json" && "$(jq -Mr '.data | length' <<<"$_services_json")" -ne 0 ]]; then
-            local _service_json
             _service_json=$(jq -Mc --arg service "$_service" \
-                '.data[] | select(.id == $service) | .' <<<"$_services_json") || return
-
-            if [[ "$_service_json" ]]; then
-                if [[ "$service_var" ]]; then
-                    butl.set_var "$service_var" "$_service_json"
-                else
-                    echo "$_service_json"
-                fi
-
-                return
-            fi
+                '.data[] | select(.id == $service)' <<<"$_services_json") || return
         fi
     fi
 
+    if [[ "$_service_json" ]]; then
+        if [[ "$service_var" ]]; then
+            butl.set_var "$service_var" "$_service_json"
+        else
+            echo "$_service_json"
+        fi
+
+        return
+    fi
+
+    echo "echo" >&2
     butl.fail "Service ${BUTL_ANSI_UNDERLINE}$_service${BUTL_ANSI_RESET_UNDERLINE} not found"
 }
 
@@ -351,7 +341,7 @@ rnchr_service_wait_for_containers_to_stop() {
     fi
 
     local service_id=
-    if [[ "$service" =~ 1s[[:digit:]]+ ]]; then
+    if [[ "$service" =~ ^1s[[:digit:]]+ ]]; then
         service_id=$service
     else
         local service_json=
@@ -410,12 +400,12 @@ rnchr_service_exists() {
         if [[ "$service_json" ]]; then
             return 0
         fi
-    elif [[ "$service" =~ 1s[[:digit:]]+ ]]; then
+    elif [[ "$service" =~ ^1s[[:digit:]]+ ]]; then
         local response=
         _rnchr_pass_env_args rnchr_env_api \
             --response-var response \
             "services" \
-            --get --data-urlencode "id=$service" || return
+            --get --data-urlencode "id=${service#1s}" || return
 
         if [[ "$response" && "$(jq -Mr '.data | length' <<<"$response")" -ne 0 ]]; then
             local service_json=
@@ -765,6 +755,14 @@ rnchr_service_upgrade() {
     barg.arg no_update_links \
         --long=no-update-links \
         --desc="If set, does not upgrade service links after deploying"
+    barg.arg finish_upgrade \
+        --long=finish-upgrade \
+        --desc="Finishes upgrade"
+    barg.arg finish_upgrade_timeout \
+        --implies=finish_upgrade \
+        --long=finish-upgrade-timeout \
+        --value=SECONDS \
+        --desc="Finishes upgrade but fails if exceeds given time"
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -784,6 +782,8 @@ rnchr_service_upgrade() {
     local force_start_first=
     local stack_compose_json=()
     local no_update_links=
+    local finish_upgrade=
+    local finish_upgrade_timeout=
 
     local should_exit=
     local should_exit_err=0
@@ -869,6 +869,17 @@ rnchr_service_upgrade() {
     if ! ((no_update_links)); then
         _rnchr_pass_env_args rnchr_service_update_links "$stack_service" \
             --service-compose-json "$service_compose_json" || return
+    fi
+
+    if ((finish_upgrade)); then
+        if [[ "$finish_upgrade_timeout" ]]; then
+            butl.timeout "$finish_upgrade_timeout" \
+                _rnchr_pass_env_args rnchr_service_wait_for_action "$service_id" finishupgrade || return
+        else
+            _rnchr_pass_env_args rnchr_service_wait_for_action "$service_id" finishupgrade || return
+        fi
+
+        _rnchr_pass_env_args rnchr_service_make_upgradable "$service_id" || return
     fi
 }
 
@@ -1067,6 +1078,116 @@ rnchr_service_update_links() {
 
         butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
             "/services/$service_id/?action=setservicelinks" -X POST -d "$payload" || return
+    fi
+}
+
+rnchr_service_wait_for_action() {
+    _rnchr_env_args
+    barg.arg service \
+        --required \
+        --value=SERVICE \
+        --desc="Service ID or <STACK>/<NAME>"
+    barg.arg action \
+        --required \
+        --value=ACTION \
+        --desc="Action to wait for for"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local service=
+    local action=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    butl.log_debug "Waiting for service $service to have action $action"
+
+    while true; do
+        local service_json=
+        _rnchr_pass_env_args rnchr_service_get --service-var service_json "$service" || return
+
+        local endpoint=
+        endpoint=$(jq -Mr --arg action "$action" \
+            '.actions[$action] | select(. != null)' <<<"$service_json") || return
+
+        # If endpoint is available, print it and break from loop
+        if [[ "$endpoint" ]]; then
+            break
+        fi
+
+        # Wait for 1 seconds before trying again
+        sleep 1
+    done
+}
+
+rnchr_service_make_upgradable() {
+    _rnchr_env_args
+    barg.arg service \
+        --required \
+        --value=SERVICE \
+        --desc="Service ID or <STACK>/<NAME>"
+    barg.arg await \
+        --short=w \
+        --long=wait \
+        --desc="Wait for service to be in an upgradable state"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local service=
+    local await=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    butl.log_debug "Making Service $service reach an upgradable state"
+
+    local service_json=
+    _rnchr_pass_env_args rnchr_service_get --service-var service_json "$service" || return
+
+    local endpoint=
+    local action_endpoint=
+    for action in finishupgrade rollback; do
+        endpoint=$(jq -Mr --arg action "$action" \
+            '.actions[$action] | select(. != null)' <<<"$service_json") || return
+
+        if [[ "$endpoint" ]]; then
+            action_endpoint=$endpoint
+            : "Service ${BUTL_ANSI_UNDERLINE}$service${BUTL_ANSI_RESET_UNDERLINE}"
+            butl.log_debug "$_ pending $action..."
+            break
+        fi
+    done
+
+    if [[ "$action_endpoint" ]]; then
+        butl.muffle_all rnchr_env_api "$action_endpoint" -X POST || return
+
+        if ((await)); then
+            _rnchr_pass_env_args rnchr_stack_wait_for_service_action "$stack" upgrade "$service" || return
+        fi
     fi
 }
 

@@ -68,8 +68,8 @@ rnchr_secret_get() {
     fi
 
     local query=
-    if [[ "$name" =~ 1se[[:digit:]]+ ]]; then
-        query="id=$name"
+    if [[ "$name" =~ ^1se[[:digit:]]+ ]]; then
+        query="id=${name#1se}"
     else
         query="name=$name"
     fi
@@ -124,7 +124,7 @@ rnchr_secret_get_id() {
     fi
 
     local secret_id=
-    if [[ "$name" =~ 1se[[:digit:]]+ ]]; then
+    if [[ "$name" =~ ^1se[[:digit:]]+ ]]; then
         secret_id=$name
     else
         local secret=
@@ -390,17 +390,17 @@ rnchr_secret_exists() {
         return "$should_exit_err"
     fi
 
-    local id_field=
-    if [[ "$name" =~ 1se[[:digit:]]+ ]]; then
-        id_field="id"
+    local query=
+    if [[ "$name" =~ ^1se[[:digit:]]+ ]]; then
+        query="id=${name#1se}"
     else
-        id_field="name"
+        query="name=$name"
     fi
 
     local response=
     _rnchr_pass_env_args rnchr_env_api \
         --response_var response \
-        "secrets" --get --data-urlencode "$id_field=$name" >/dev/null || return
+        "secrets" --get --data-urlencode "$query" >/dev/null || return
 
-    [[ "$response" && "$(jq -Mr --arg field "$id_field" '.data[0][$field] | select(. != null)' <<<"$response")" ]]
+    [[ "$response" && "$(jq -Mr '.data[0] | select(. != null)' <<<"$response")" ]]
 }

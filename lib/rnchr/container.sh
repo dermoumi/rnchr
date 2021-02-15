@@ -39,7 +39,7 @@ rnchr_container_get() {
     else
         local query=
         if [[ "$name" =~ ^1i[[:digit:]]+ ]]; then
-            query="id=$name"
+            query="id=${name#1i}"
         else
             query="name=$name"
         fi
