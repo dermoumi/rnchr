@@ -1,5 +1,47 @@
 #!/usr/bin/env bash
 
+rnchr_service_list() {
+    _rnchr_env_args
+    barg.arg services_var \
+        --long=services-var \
+        --value=VARIABLE \
+        --desc="Shell variable to store services list into"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local services_var=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local _response=
+    _rnchr_pass_env_args rnchr_env_api \
+        --response-var _response \
+        "services" --get \
+        --data-urlencode "limit=-1" || return
+
+    local __services_list
+    __services_list=$(jq -Mc '.data' <<<"$_response")
+
+    if [[ "$services_var" ]]; then
+        butl.set_var "$services_var" "$__services_list"
+    else
+        echo "$__services_list"
+    fi
+}
+
 rnchr_service_get() {
     _rnchr_env_args
     barg.arg _service \
@@ -574,6 +616,9 @@ rnchr_service_create() {
     barg.arg force_start_on_create \
         --long=force-start-on-create \
         --desc="If set, forces service to start on creation"
+    barg.arg no_update_links \
+        --long=no-update-links \
+        --desc="If set, does not upgrade service links after deploying"
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -591,6 +636,7 @@ rnchr_service_create() {
     local no_start_on_create=
     local force_start_on_create=
     local stack_compose_json=()
+    local no_update_links=
 
     local should_exit=
     local should_exit_err=0
@@ -619,11 +665,16 @@ rnchr_service_create() {
             local stack_compose=
             stack_compose=${stack_compose_json[0]}
 
-            local stack_service=
-            stack_service=${stack_compose_json[1]}
+            local target_service=
+            target_service=${stack_compose_json[1]}
 
-            service_compose_json=$(jq -Mc --arg service "$stack_service" \
+            service_compose_json=$(jq -Mc --arg service "$target_service" \
                 '.services[$service] | select(. != null)' <<<"$stack_compose") || return
+
+            if [[ ! "$service_compose_json" ]]; then
+                butl.fail "Compose file does not have any entry for service $target_service"
+                return
+            fi
         fi
 
         if [[ "$service_compose_json" ]]; then
@@ -670,7 +721,12 @@ rnchr_service_create() {
             }'
     ) || return
 
-    butl.muffle_all _rnchr_pass_env_args rnchr_env_api /service -X POST -d "$payload" || return
+    butl.muffle_all _rnchr_pass_env_args rnchr_env_api "/service" -X POST -d "$payload" || return
+
+    if ! ((no_update_links)); then
+        _rnchr_pass_env_args rnchr_service_update_links "$stack_service" \
+            --service-compose-json "$service_compose_json" || return
+    fi
 }
 
 rnchr_service_upgrade() {
@@ -706,6 +762,9 @@ rnchr_service_upgrade() {
     barg.arg force_start_first \
         --long=force-start-first \
         --desc="If set, forces new container to start before shutting down old containers"
+    barg.arg no_update_links \
+        --long=no-update-links \
+        --desc="If set, does not upgrade service links after deploying"
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -724,6 +783,7 @@ rnchr_service_upgrade() {
     local no_start_first=
     local force_start_first=
     local stack_compose_json=()
+    local no_update_links=
 
     local should_exit=
     local should_exit_err=0
@@ -745,11 +805,16 @@ rnchr_service_upgrade() {
             local stack_compose=
             stack_compose=${stack_compose_json[0]}
 
-            local stack_service=
-            stack_service=${stack_compose_json[1]}
+            local target_service=
+            target_service=${stack_compose_json[1]}
 
-            service_compose_json=$(jq -Mc --arg service "$stack_service" \
+            service_compose_json=$(jq -Mc --arg service "$target_service" \
                 '.services[$service] | select(. != null)' <<<"$stack_compose") || return
+
+            if [[ ! "$service_compose_json" ]]; then
+                butl.fail "Compose file does not have any entry for service $target_service"
+                return
+            fi
         fi
 
         if [[ "$service_compose_json" ]]; then
@@ -800,6 +865,209 @@ rnchr_service_upgrade() {
 
     butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
         "/services/$service_id/?action=upgrade" -X POST -d "$payload" || return
+
+    if ! ((no_update_links)); then
+        _rnchr_pass_env_args rnchr_service_update_links "$stack_service" \
+            --service-compose-json "$service_compose_json" || return
+    fi
+}
+
+rnchr_service_update_links() {
+    _rnchr_env_args
+    barg.arg stack_service \
+        --required \
+        --value=STACK/NAME \
+        --desc="Service and stack names"
+    barg.arg service_compose_json \
+        --long=service-compose-json \
+        --value=SERVICE_COMPOSE \
+        --desc="Service compose JSON"
+    barg.arg stack_compose_json \
+        --long=stack-compose-json \
+        --value=STACK_COMPOSE \
+        --value=SERVICE \
+        --desc="Service from stack compose JSON"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local stack_service=
+    local service_compose_json=
+    local stack_compose_json=()
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    if [[ ! "$service_compose_json" ]] && ((${#stack_compose_json[@]} > 0)); then
+        local stack_compose=
+        stack_compose=${stack_compose_json[0]}
+
+        local target_service=
+        target_service=${stack_compose_json[1]}
+
+        service_compose_json=$(jq -Mc --arg service "$target_service" \
+            '.services[$service] | select(. != null)' <<<"$stack_compose") || return
+
+        if [[ ! "$service_compose_json" ]]; then
+            butl.fail "Compose file does not have any entry for service $target_service"
+            return
+        fi
+    fi
+
+    if [[ ! "$service_compose_json" ]]; then
+        butl.fail "No service configuration was supplied"
+        return
+    fi
+
+    local links_str
+    links_str=$(jq -Mr "(.external_links // []) + (.links // []) | .[]" <<<"$service_compose_json")
+
+    local links
+    butl.split_lines links "$links_str" || return
+
+    if ((${#links[@]})); then
+        # preload rancher env ID before running co_run
+        _rnchr_pass_args rnchr_env_get_id "$rancher_env" >/dev/null || return
+
+        # Retrieve stacks and services lists
+        local json_map=()
+        butl.co_run json_map \
+            "_rnchr_pass_env_args rnchr_stack_list" \
+            "_rnchr_pass_env_args rnchr_service_list" || return
+
+        local stacks_list=${json_map[0]}
+        local services_list=${json_map[1]}
+
+        # Retrieve stack and service info
+        local service_id=
+        local service_name=
+        local stack_id=
+        local stack_name=
+
+        # Retrieve stack data
+        if [[ "$stack_service" =~ \/ ]]; then
+            stack_name=${stack_service%%/*}
+            service_name=${stack_service#$stack_name\/}
+
+            if [[ "$stack_name" =~ ^1st[[:digit:]]+ ]]; then
+                stack_id=$stack_name
+                stack_name=$(jq -Mr --arg id "$stack_id" \
+                    '.[] | select(.id == $id) | .name' <<<"$stacks_list") || return
+            else
+                stack_id=$(jq -Mr --arg name "$stack_name" \
+                    '.[] | select(.name == $name) | .id' <<<"$stacks_list") || return
+            fi
+
+            if [[ ! "$stack_id" ]]; then
+                butl.fail "Stack $stack_name does not exist"
+                return
+            fi
+        fi
+
+        # Retrieve service data
+        local service_json
+        if [[ "$stack_service" =~ ^1s[[:digit:]]+ ]]; then
+            service_id=$stack_service
+
+            service_json=$(jq -Mc --arg id "$service_id" \
+                '.[] | select(.id == $id)' <<<"$services_list") || return
+
+            if [[ ! "$service_json" ]]; then
+                butl.fail "Service $service_id does not exist"
+                return
+            fi
+
+            service_name=$(jq -Mr '.name' <<<"$service_json") || return
+            stack_id=$(jq -Mr '.stackId' <<<"$service_json") || return
+            stack_name=$(jq -Mr --arg id "$stack_id" \
+                '.[] | select(.id == $id) | .name' <<<"$stacks_list") || return
+        elif [[ "$service_name" && "$stack_id" ]]; then
+            service_json=$(jq -Mc --arg name "$service_name" --arg stackId "$stack_id" \
+                '.[] | select((.name == $name) and (.stackId == $stackId))' <<<"$services_list") || return
+
+            if [[ ! "$service_json" ]]; then
+                butl.fail "Service $stack_name/$service_name does not exist"
+                return
+            fi
+
+            service_id=$(jq -Mr '.id' <<<"$service_json") || return
+        fi
+
+        # Generate payload
+        local payload='{"serviceLinks":[]}'
+
+        # Loop over links
+        local link
+        for link in "${links[@]}"; do
+            local alias=${link##*:}
+            local target_service=${link%:$alias}
+
+            # Get the target service ID
+            local target_service_id
+            local target_service_name
+            if [[ "$target_service" =~ \/ ]]; then
+                local stack=${target_service%%/*}
+                local service=${target_service#$stack\/}
+
+                local target_stack_id
+                target_stack_id=$(jq -Mr --arg name "$stack" \
+                    '.[] | select(.name == $name) | .id' <<<"$stacks_list") || return
+
+                local target_service_json
+                target_service_json=$(jq -Mc --arg name "$service" --arg stackId "$target_stack_id" \
+                    '.[] | select((.name == $name) and (.stackId == $stackId))' <<<"$services_list") || return
+
+                if [[ ! "$target_service_json" ]]; then
+                    butl.fail "Target service $target_service does not exist"
+                    return
+                fi
+
+                target_service_id=$(jq -Mr '.id' <<<"$target_service_json") || return
+                target_service_name=$service
+            else
+                local target_service_json
+                target_service_json=$(jq -Mc --arg name "$target_service" --arg stackId "$stack_id" \
+                    '.[] | select((.name == $name) and (.stackId == $stackId))' <<<"$services_list") || return
+
+                if [[ ! "$target_service_json" ]]; then
+                    butl.fail "Target service $target_service does not exist"
+                    return
+                fi
+
+                target_service_id=$(jq -Mr '.id' <<<"$target_service_json") || return
+                target_service_name=$(jq -Mr '.name' <<<"$target_service_json") || return
+            fi
+
+            if [[ "$alias" == "$target_service_name" ]]; then
+                local destination=
+            else
+                local destination=$alias
+            fi
+
+            butl.log_debug "Linking $target_service ($target_service_id) -> $alias"
+            payload=$(
+                jq -Mc --arg alias "$destination" --arg serviceId "$target_service_id" \
+                    '.serviceLinks += [{
+                        "name": $alias,
+                        "serviceId": $serviceId,
+                    }]' <<<"$payload"
+            )
+        done
+
+        butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
+            "/services/$service_id/?action=setservicelinks" -X POST -d "$payload" || return
+    fi
 }
 
 rnchr_service_util_to_launch_config() {
