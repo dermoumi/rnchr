@@ -35,7 +35,7 @@ rnchr_secret_list() {
     _output=$(jq -Mc '.data' <<<"$response") || return
 
     if [[ "$secrets_var" ]]; then
-        butl.set_var "$secret_var" "$_output"
+        butl.set_var "$secrets_var" "$_output"
     else
         echo "$_output"
     fi

@@ -36,7 +36,7 @@ rnchr_service_get() {
             query="name=$service_name"
         fi
 
-        # pre-load rancher env ID before running co_run
+        # preload rancher env ID before running co_run
         _rnchr_pass_args rnchr_env_get_id "$rancher_env" >/dev/null || return
 
         local _json_map=()
@@ -542,5 +542,251 @@ rnchr_service_logs() {
         for pid in "${pids[@]}"; do
             wait "$pid" || true
         done
+    fi
+}
+
+rnchr_service_util_to_launch_config() {
+    _rnchr_env_args
+    barg.arg compose \
+        --required \
+        --value=JSON \
+        --desc="Compose JSON to work with"
+    barg.arg __config_var \
+        --long=config-var \
+        --value=VARIABLE \
+        --desc="Shell variable to store the config into"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local compose=
+    local __config_var=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    butl.log_debug "Converting service compose to rancher launch config"
+
+    # Need to reference secrets by their IDs, so we fetch all of them from rancher and match
+    local secrets=
+    _rnchr_pass_env_args rnchr_service_util_reference_secrets "$compose" --secrets-var secrets || return
+
+    # Some extra values from rancher-compose
+    local milli_cpu_reservation
+    milli_cpu_reservation=$(jq -Mc '.milli_cpu_reservation' <<<"$compose") || return
+    local drain_timeout_ms
+    drain_timeout_ms=$(jq -Mc '.drain_timeout_ms' <<<"$compose") || return
+    local start_on_create
+    start_on_create=$(jq -Mc '.start_on_create' <<<"$compose") || return
+
+    # Health check only needs to be added IF defined
+    local health_check
+    health_check=$(jq -Mc '.health_check' <<<"$compose")
+    if [[ "$health_check" != "null" ]]; then
+        health_check=$(jq -Mc '{
+            "type": "instanceHealthCheck",
+            "healthyThreshold": .healthy_threshold,
+            "initializingTimeout": .initializing_timeout,
+            "interval": .interval,
+            "name": null,
+            "port": .port,
+            "recreateOnQuorumStrategyConfig": {
+                "type": "recreateOnQuorumStrategyConfig",
+                "quorum": .recreate_on_quorum_strategy_config.quorum
+            },
+            "reinitializingTimeout": .reinitializing_timeout,
+            "requestLine": .request_line,
+            "responseTimeout": .response_timeout,
+            "strategy": .strategy,
+            "unhealthyThreshold": .unhealthy_threshold
+        }' <<<"$health_check") || return
+    fi
+
+    # Build a new json with all the info from docker-compose
+    # Most of it is just converting case and making sure there
+    # are some non-null defaults when some values are not defined
+    local __launch_config
+    __launch_config=$(jq -Mc \
+        --argjson startOnCreate "$start_on_create" \
+        --argjson drainTimeoutMs "$drain_timeout_ms" \
+        --argjson milliCpuReservation "$milli_cpu_reservation" \
+        --argjson healthCheck "$health_check" \
+        --argjson secrets "$secrets" \
+        '{
+        "type": "launchConfig",
+        "kind": "container",
+        "startOnCreate": $startOnCreate,
+        "drainTimeoutMs": ($drainTimeoutMs // 0),
+        "networkMode": (.network_mode // "managed"),
+        "readOnly": (.read_only // false),
+        "runInit": (.init // false),
+        "stdinOpen": .stdin_open,
+        "dataVolumes": .volumes,
+        "imageUuid": ("docker:" + .image),
+        "logConfig": {
+            "type": "logConfig",
+            "driver": .logging.driver,
+            "config": (.logging.options // {})
+        },
+        "healthCheck": $healthCheck,
+        "shmSize": .shm_size,
+        "dataVolumesFrom": (.volumes_from // []),
+        "dnsSearch": (.dns_search // []),
+        "capAdd": (.cap_add // []),
+        "capDrop": (.cap_drop // []),
+        "cgroupParent": .cgroup_parent,
+        "cpuCount": .cpu_count,
+        "cpuPercent": .cpu_percent,
+        "cpuQuota": .cpuQuota,
+        "cpuShares": .cpu_shares,
+        "domainName": .domainname,
+        "ipcMode": .ipc,
+        "memory": .mem_limit,
+        "memoryReservation": .mem_reservation,
+        "memorySwap": .memswap_limit,
+        "memorySwappiness": .mem_swappiness,
+        "milliCpuReservation": $milliCpuReservation,
+        "oomScoreAdj": .oom_score_adj,
+        "pidMode": .pid,
+        "pidsLimit": .pids_limit,
+        "stopSignal": .stop_signal,
+        "stopTimeout": .stop_grace_period,
+        "usernsMode": .userns_mode,
+        "volumeDriver": .volume_driver,
+        "workingDir": .working_dir,
+        "labels": (.labels // {"io.rancher.container.pull_image": "always"}),
+        "blkioWeight": null,
+        "count": .count,
+        "cpuPeriod": .cpu_period,
+        "cpuRealtimePeriod": null,
+        "cpuRealtimeRuntime": null,
+        "cpuSet": .cpuset,
+        "cpuSetMems": null,
+        "dataVolumesFromLaunchConfigs": [],
+        "description": .description,
+        "devices": (.devices // []),
+        "diskQuota": null,
+        "dns": (.dns // []),
+        "healthInterval": null,
+        "healthRetries": null,
+        "healthTimeout": null,
+        "hostname": .hostname,
+        "ioMaximumBandwidth": null,
+        "ioMaximumIOps": null,
+        "ip": .ip,
+        "ip6": .ip6,
+        "isolation": .isolation,
+        "kernelMemory": null,
+        "memoryMb": null,
+        "networkLaunchConfig": null,
+        "ports": (.ports // []),
+        "requestedIpAddress": null,
+        "user": .user,
+        "userdata": .userdata,
+        "uts": .uts,
+        "instanceTriggeredStop": "stop",
+        "privileged": (.privileged // false),
+        "publishAllPorts": false,
+        "secrets": $secrets,
+        "system": (.system // false),
+        "tty": (.tty // false),
+        "vcpu": (.vcpu // 1),
+        "environment": (.environment // {}),
+        "command": (.command // [])
+    }' <<<"$compose") || return
+
+    if [[ "$__config_var" ]]; then
+        butl.set_var "$__config_var" "$__launch_config"
+    else
+        echo "$__launch_config"
+    fi
+}
+
+rnchr_service_util_reference_secrets() {
+    _rnchr_env_args
+    barg.arg compose \
+        --required \
+        --value=JSON \
+        --desc="Compose JSON to work with"
+    barg.arg __secrets_var \
+        --long=secrets-var \
+        --value=VARIABLE \
+        --desc="Shell variable to store the secrets array into"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local compose=
+    local __secrets_var=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    # Need to reference secrets by their IDs
+    # So we fetch all of them from rancher and match
+    local referenced_secrets
+    butl.split_lines referenced_secrets "$(jq -Mrc '.secrets[]?' <<<"$compose")"
+
+    local __secrets='[]'
+    if ((${#referenced_secrets[@]})); then
+        butl.log_debug "Dereferencing secrets"
+
+        local secrets_json
+        _rnchr_pass_env_args rnchr_secret_list --secrets-var secrets_json || return
+
+        local secret
+        for secret in "${referenced_secrets[@]}"; do
+            local ref_name
+            ref_name=$(jq -Mr '.source' <<<"$secret") || return
+
+            local secret_id
+            secret_id=$(jq -Mr --arg name "$ref_name" \
+                '.[] | select(.name == $name) | .id | select(. != null)' <<<"$secrets_json") || return
+
+            if [[ ! "$secret_id" ]]; then
+                : "Cannot retrieve ID for Rancher secret ${BUTL_ANSI_UNDERLINE}$ref_name${BUTL_ANSI_RESET_UNDERLINE}"
+                butl.fail "$_"
+                return
+            fi
+
+            __secrets=$(jq -Mc \
+                --argjson secret "$secret" \
+                --arg secretId "$secret_id" \
+                '. + [(
+                    $secret
+                    | .type = "secretReference"
+                    | .name = .target
+                    | .secretId = $secretId
+                    | del(.target, .source)
+                )]' <<<"$__secrets") || return
+        done
+    fi
+
+    if [[ "$__secrets_var" ]]; then
+        butl.set_var "$__secrets_var" "$__secrets"
+    else
+        echo "$__secrets"
     fi
 }

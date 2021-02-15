@@ -631,3 +631,200 @@ rnchr_stack_update_meta() {
     butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
         "stacks/$_stack_id" -X PUT -d "$payload" || return
 }
+
+rnchr_stack_wait_for_service_action() {
+    _rnchr_env_args
+    barg.arg stack \
+        --required \
+        --value=STACK \
+        --desc="Stack name"
+    barg.arg action \
+        --required \
+        --value=ACTION \
+        --desc="Action to wait for for"
+    barg.arg services \
+        --multi \
+        --value=SERVICE \
+        --desc="Service to watch for"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local stack=
+    local action=
+    local services=()
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    butl.log_debug "Waiting for services to have action $action: ${services[*]/#/$stack}"
+
+    local service_count=${#services[@]}
+    if ((service_count == 1)); then
+        local service=${services[0]}
+
+        while true; do
+            local service_json=
+            _rnchr_pass_env_args rnchr_service_get --service-var service_json "$stack/$service" || return
+
+            local endpoint=
+            endpoint=$(jq -Mr --arg action "$action" \
+                '.actions[$action] | select(. != null)' <<<"$service_json") || return
+
+            # If endpoint is available, print it and break from loop
+            if [[ "$endpoint" ]]; then
+                break
+            fi
+
+            # Wait for 1 seconds before trying again
+            sleep 1
+        done
+    elif ((service_count > 1)); then
+        while true; do
+            local services_json=
+            _rnchr_pass_env_args rnchr_stack_get_services --services-var services_json "$stack" || return
+
+            local service
+            local failed=0
+            for service in "${services[@]}"; do
+                local service_json=
+                service_json=$(jq -Mc --arg service "$service" \
+                    '.[] | select(.name == $service)' <<<"$services_json") || return
+
+                if [[ ! "$service_json" ]]; then
+                    butl.fail "Service $stack/$service not found"
+                    return
+                fi
+
+                local endpoint=
+                endpoint=$(jq -Mr --arg action "$action" \
+                    '.actions[$action] | select(. != null)' <<<"$service_json") || return
+
+                # If endpoint is available, print it and break from loop
+                if [[ ! "$endpoint" ]]; then
+                    failed=1
+                fi
+            done
+
+            if ! ((failed)); then
+                break
+            fi
+
+            # Wait for 1 seconds before trying again
+            sleep 1
+        done
+    fi
+}
+
+rnchr_stack_make_services_upgradable() {
+    _rnchr_env_args
+    barg.arg stack \
+        --required \
+        --value=STACK \
+        --desc="Stack name"
+    barg.arg services \
+        --multi \
+        --value=SERVICE \
+        --desc="Service to watch for"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local stack=
+    local services=()
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local service_count=${#services[@]}
+    if ((service_count == 1)); then
+        local service=${services[0]}
+        butl.log_debug "Making $stack/$service reach an upgradable state"
+
+        local service_json=
+        _rnchr_pass_env_args rnchr_service_get --service-var service_json "$stack/$service" || return
+
+        local endpoint=
+        local action_endpoint=
+        for action in finishupgrade rollback; do
+            endpoint=$(jq -Mr --arg action "$action" \
+                '.actions[$action] | select(. != null)' <<<"$service_json") || return
+
+            if [[ "$endpoint" ]]; then
+                action_endpoint=$endpoint
+                : "Service ${BUTL_ANSI_UNDERLINE}$service${BUTL_ANSI_RESET_UNDERLINE}"
+                butl.log_debug "$_ pending $action..."
+                break
+            fi
+        done
+
+        if [[ "$action_endpoint" ]]; then
+            butl.muffle_all rnchr_env_api "$action_endpoint" -X POST || return
+            _rnchr_pass_env_args rnchr_stack_wait_for_service_action "$stack" upgrade "$service" || return
+        fi
+    elif ((service_count > 1)); then
+        local stack_services
+        _rnchr_pass_env_args rnchr_stack_get_services "$stack" --services-var stack_services || return
+
+        local services_awaiting=()
+        local service
+        for service in "${services[@]}"; do
+            butl.log_debug "Making $stack/$service reach an upgradable state"
+
+            local service_json=
+            service_json=$(jq -Mc --arg service "$service" \
+                '.[] | select(.name == $service)' <<<"$stack_services") || return
+
+            if [[ ! "$service_json" ]]; then
+                butl.fail "Service $stack/$service does not exist"
+                return
+            fi
+
+            local endpoint=
+            local action_endpoint=
+            for action in finishupgrade rollback; do
+                endpoint=$(jq -Mr --arg action "$action" \
+                    '.actions[$action] | select(. != null)' <<<"$service_json") || return
+
+                if [[ "$endpoint" ]]; then
+                    action_endpoint=$endpoint
+                    : "Service ${BUTL_ANSI_UNDERLINE}$service${BUTL_ANSI_RESET_UNDERLINE}"
+                    butl.log_debug "$_ pending $action..."
+                    break
+                fi
+            done
+
+            if [[ "$action_endpoint" ]]; then
+                butl.muffle_all rnchr_env_api "$action_endpoint" -X POST || return
+                services_awaiting+=("$service")
+            fi
+        done
+
+        if ((${#services_awaiting[@]})); then
+            _rnchr_pass_env_args rnchr_stack_wait_for_service_action \
+                "$stack" upgrade "${services_awaiting[@]}" || return
+        fi
+    fi
+}
