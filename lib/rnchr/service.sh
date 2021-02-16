@@ -713,7 +713,7 @@ rnchr_service_create() {
 
     butl.muffle_all _rnchr_pass_env_args rnchr_env_api "/service" -X POST -d "$payload" || return
 
-    if ! ((no_update_links)); then
+    if ! ((no_update_links)) && [[ "$service_compose_json" ]]; then
         _rnchr_pass_env_args rnchr_service_update_links "$stack_service" \
             --service-compose-json "$service_compose_json" || return
     fi
@@ -763,6 +763,14 @@ rnchr_service_upgrade() {
         --long=finish-upgrade-timeout \
         --value=SECONDS \
         --desc="Finishes upgrade but fails if exceeds given time"
+    barg.arg ensure_secrets \
+        --implies=finish_upgrade \
+        --long=ensure-secrets \
+        --desc="Makes sure secrets are mounted after deploying"
+    barg.arg _use_payload \
+        --hidden \
+        --long=use-payload \
+        --value=PAYLOAD
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -784,6 +792,8 @@ rnchr_service_upgrade() {
     local no_update_links=
     local finish_upgrade=
     local finish_upgrade_timeout=
+    local ensure_secrets=
+    local _use_payload=
 
     local should_exit=
     local should_exit_err=0
@@ -793,86 +803,94 @@ rnchr_service_upgrade() {
         return "$should_exit_err"
     fi
 
+    local service_json
+    _rnchr_pass_env_args rnchr_service_get --service-var service_json "$stack_service" || return
+
     local service_id
-    _rnchr_pass_env_args rnchr_service_get_id --id-var service_id "$stack_service" || return
+    service_id=$(jq -Mr '.id' <<<"$service_json") || return
 
-    local batch_size=1
-    local interval_millis=2000
-    local start_first=false
+    local payload
+    if [[ "$_use_payload" ]]; then
+        payload=$_use_payload
+    else
+        local batch_size=1
+        local interval_millis=2000
+        local start_first=false
 
-    if [[ ! "$launch_config" ]]; then
-        if [[ ! "$service_compose_json" ]] && ((${#stack_compose_json[@]} > 0)); then
-            local stack_compose=
-            stack_compose=${stack_compose_json[0]}
+        if [[ ! "$launch_config" ]]; then
+            if [[ ! "$service_compose_json" ]] && ((${#stack_compose_json[@]} > 0)); then
+                local stack_compose=
+                stack_compose=${stack_compose_json[0]}
 
-            local target_service=
-            target_service=${stack_compose_json[1]}
+                local target_service=
+                target_service=${stack_compose_json[1]}
 
-            _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
-                "$stack_compose" "$target_service" --compose-var service_compose_json || return
+                _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
+                    "$stack_compose" "$target_service" --compose-var service_compose_json || return
+            fi
 
-            if [[ ! "$service_compose_json" ]]; then
-                butl.fail "Compose file does not have any entry for service $target_service"
-                return
+            if [[ "$service_compose_json" ]]; then
+                _rnchr_pass_env_args rnchr_service_util_to_launch_config "$service_compose_json" \
+                    --config-var launch_config || return
+
+                batch_size=$(jq -Mr '.upgrade_strategy.batch_size // 1' <<<"$service_compose_json") || return
+                interval_millis=$(jq -Mr '.upgrade_strategy.interval_millis // 2000' <<<"$service_compose_json") || return
+                start_first=$(jq -Mr '.upgrade_strategy.start_first // false' <<<"$service_compose_json") || return
             fi
         fi
 
-        if [[ "$service_compose_json" ]]; then
-            _rnchr_pass_env_args rnchr_service_util_to_launch_config "$service_compose_json" \
-                --config-var launch_config || return
-
-            batch_size=$(jq -Mr '.upgrade_strategy.batch_size // 1' <<<"$service_compose_json") || return
-            interval_millis=$(jq -Mr '.upgrade_strategy.interval_millis // 2000' <<<"$service_compose_json") || return
-            start_first=$(jq -Mr '.upgrade_strategy.start_first // false' <<<"$service_compose_json") || return
+        if [[ ! "$launch_config" ]]; then
+            batch_size=$(jq -Mc '.upgrade.inServiceStrategy.batchSize' <<<"$service_json") || return
+            interval_millis=$(jq -Mc '.upgrade.inServiceStrategy.intervalMillis' <<<"$service_json") || return
+            start_first=$(jq -Mc '.upgrade.inServiceStrategy.startFirst' <<<"$service_json") || return
+            launch_config=$(jq -Mc '.upgrade.inServiceStrategy.launchConfig' <<<"$service_json") || return
         fi
-    fi
 
-    if [[ ! "$launch_config" ]]; then
-        butl.fail "No service configuration was supplied"
-        return
-    fi
+        if [[ "$batch_size_override" ]]; then
+            batch_size=$batch_size_override
+        fi
 
-    if [[ "$batch_size_override" ]]; then
-        batch_size=$batch_size_override
-    fi
+        if [[ "$interval_override" ]]; then
+            interval_millis=$interval_override
+        fi
 
-    if [[ "$interval_override" ]]; then
-        interval_millis=$interval_override
-    fi
+        if ((force_start_first)); then
+            start_first=true
+        elif ((no_start_first)); then
+            start_first=false
+        fi
 
-    if ((force_start_first)); then
-        start_first=true
-    elif ((no_start_first)); then
-        start_first=false
+        payload=$(
+            jq -Mnc \
+                --argjson startFirst "$start_first" \
+                --argjson batchSize "$batch_size" \
+                --argjson interval "$interval_millis" \
+                --argjson launchConfig "$launch_config" \
+                '{
+                    "inServiceStrategy": {
+                        "batchSize": $batchSize,
+                        "intervalMillis": $interval,
+                        "startFirst": $startFirst,
+                        "launchConfig": $launchConfig
+                    }
+                }'
+        ) || return
     fi
-
-    local payload
-    payload=$(
-        jq -Mnc \
-            --argjson startFirst "$start_first" \
-            --argjson batchSize "$batch_size" \
-            --argjson interval "$interval_millis" \
-            --argjson launchConfig "$launch_config" \
-            '{
-                "inServiceStrategy": {
-                    "batchSize": $batchSize,
-                    "intervalMillis": $interval,
-                    "startFirst": $startFirst,
-                    "launchConfig": $launchConfig
-                }
-            }'
-    ) || return
 
     butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
         "/services/$service_id/?action=upgrade" -X POST -d "$payload" || return
 
-    if ! ((no_update_links)); then
+    if ! ((no_update_links)) && [[ "$service_compose_json" ]]; then
         _rnchr_pass_env_args rnchr_service_update_links "$stack_service" \
             --service-compose-json "$service_compose_json" || return
     fi
 
     if ((finish_upgrade)); then
         _rnchr_pass_env_args rnchr_service_finish_upgrade "$service_id" --timeout="$finish_upgrade_timeout" || return
+
+        if ((ensure_secrets)); then
+            _rnchr_pass_env_args rnchr_service_ensure_secrets_mounted "$service_id" --use-payload "$payload" || return
+        fi
     fi
 }
 
@@ -1257,6 +1275,84 @@ rnchr_service_make_upgradable() {
         if ((await)); then
             _rnchr_pass_env_args rnchr_stack_wait_for_service_action "$stack" upgrade "$service" || return
         fi
+    fi
+}
+
+rnchr_service_ensure_secrets_mounted() {
+    _rnchr_env_args
+    barg.arg service \
+        --required \
+        --value=SERVICE \
+        --desc="Service ID or <STACK>/<NAME>"
+    barg.arg no_fix \
+        --long=no-fix \
+        --desc="Do not attempt to fix the service"
+    barg.arg upgrade_args \
+        --multi \
+        --value=ARGS \
+        --allow-dash \
+        --desc="Upgrade arguments to pass to rncher_service_upgrade"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local service=
+    local no_fix=
+    local upgrade_args=()
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local service_id
+    _rnchr_pass_env_args rnchr_service_get_id --id-var service_id "$service" || return
+
+    local service_containers_json=
+    rnchr_service_get_containers "$service_id" --containers-var service_containers_json || return
+
+    local service_containers=
+    service_containers=$(jq -Mr '.[].id' <<<"$service_containers_json") || return
+
+    if [[ ! "$service_containers" ]]; then
+        return 0
+    fi
+
+    local co_run_commands=()
+    local container=
+    while read -r container; do
+        butl.log_debug "Checking container $service/$container..."
+        co_run_commands+=("[[ \"\$(rnchr_container_exec '$container' ls /run/secrets/)\" ]]")
+    done <<<"$service_containers"
+
+    # shellcheck disable=SC2034
+    local result
+
+    if ! butl.co_run result "${co_run_commands[@]}"; then
+        if ((no_fix)); then
+            butl.log_error "Service $service does not have secrets mounted..."
+            return 1
+        fi
+
+        butl.log_error "Service $service does not have secrets mounted, re-deploying..."
+
+        if ((${#upgrade_args[@]})); then
+            _rnchr_pass_env_args rnchr_service_upgrade "$service_id" "${upgrade_args[@]}" --finish-upgrade || return
+        else
+            _rnchr_pass_env_args rnchr_service_upgrade "$service_id" --finish-upgrade || return
+        fi
+
+        _rnchr_pass_env_args rnchr_service_wait_for_action "$service_id" upgrade || return
+        _rnchr_pass_env_args rnchr_service_ensure_secrets_mounted "$service_id" || return
     fi
 }
 
