@@ -1001,3 +1001,98 @@ rnchr_stack_upgrade_services() {
         butl.co_run result "${co_run_commands[@]}" || return
     fi
 }
+
+rnchr_stack_ensure_secrets_mounted() {
+    _rnchr_env_args
+    barg.arg stack \
+        --required \
+        --value=STACK \
+        --desc="Stack name"
+    barg.arg services \
+        --multi \
+        --value=SERVICE \
+        --desc="Service to watch for"
+    barg.arg compose_json \
+        --long=compose-json \
+        --value=JSON \
+        --desc="Stack compose JSON"
+    barg.arg finish_upgrade_timeout \
+        --long=finish-upgrade-timeout \
+        --value=SECONDS \
+        --desc="Finishes upgrade but fails if exceeds given time"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local stack=
+    local services=()
+    local compose_json=
+    local finish_upgrade_timeout=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local concerned_services=
+    if ((${#services[@]})); then
+        concerned_services=("${services[@]}")
+    else
+        butl.split_lines concerned_services "$(jq -Mrc '.services | to_entries[]
+            | select(.value.secrets | length > 0) | .key' <<<"$compose_json")" || return
+    fi
+
+    # preload rancher env ID before running co_run
+    _rnchr_pass_args rnchr_env_get_id "${RANCHER_ENVIRONMENT:-}" >/dev/null || return
+
+    local affected_services=()
+    local service=
+
+    if ((${#concerned_services[@]} == 1)); then
+        service="${concerned_services[0]}"
+        if ! _rnchr_pass_env_args rnchr_service_ensure_secrets_mounted "$stack/$service" --no-fix; then
+            affected_services+=("$service")
+        fi
+    elif ((${#concerned_services[@]} > 0)); then
+        local args=()
+        for service in "${concerned_services[@]}"; do
+            butl.log_info "Checking $service..."
+
+            : "_rnchr_pass_env_args rnchr_service_ensure_secrets_mounted"
+            args+=("$_ '$stack/$service' --no-fix || echo '$service'")
+        done
+
+        local result=()
+        butl.co_run result "${args[@]}" || return
+
+        if ((${#result[@]})); then
+            for service in "${result[@]}"; do
+                if [[ "$service" ]]; then
+                    affected_services+=("$service")
+                fi
+            done
+        fi
+    fi
+
+    if ((${#affected_services[@]})); then
+        : "$(butl.join_by ', ' "${affected_services[@]}")"
+        butl.log_error "Stack $stack has services with no secrets mounted: $_, re-deploying..."
+
+        _rnchr_pass_env_args rnchr_stack_upgrade_services "$stack" --compose-json "$compose_json" \
+            "${affected_services[@]}" --finish-upgrade --finish-upgrade-timeout="$finish_upgrade_timeout" || return
+
+        _rnchr_pass_env_args rnchr_stack_make_services_upgradable "$stack" "${affected_services[@]}" || return
+
+        _rnchr_pass_env_args rnchr_stack_ensure_secrets_mounted "$stack" --compose-json "$compose_json" \
+            "${affected_services[@]}" || return
+    fi
+}

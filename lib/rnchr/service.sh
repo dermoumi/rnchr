@@ -1320,10 +1320,10 @@ rnchr_service_ensure_secrets_mounted() {
     local service_containers_json=
     rnchr_service_get_containers "$service_id" --containers-var service_containers_json || return
 
-    local service_containers=
-    service_containers=$(jq -Mr '.[].id' <<<"$service_containers_json") || return
+    local service_container_ids=
+    service_container_ids=$(jq -Mr '.[].id' <<<"$service_containers_json") || return
 
-    if [[ ! "$service_containers" ]]; then
+    if [[ ! "$service_container_ids" ]]; then
         return 0
     fi
 
@@ -1332,7 +1332,7 @@ rnchr_service_ensure_secrets_mounted() {
     while read -r container; do
         butl.log_debug "Checking container $service/$container..."
         co_run_commands+=("[[ \"\$(rnchr_container_exec '$container' ls /run/secrets/)\" ]]")
-    done <<<"$service_containers"
+    done <<<"$service_container_ids"
 
     # shellcheck disable=SC2034
     local result
