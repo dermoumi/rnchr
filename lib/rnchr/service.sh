@@ -117,7 +117,6 @@ rnchr_service_get() {
         return
     fi
 
-    echo "echo" >&2
     butl.fail "Service ${BUTL_ANSI_UNDERLINE}$_service${BUTL_ANSI_RESET_UNDERLINE} not found"
 }
 
@@ -562,9 +561,11 @@ rnchr_service_logs() {
             # Putting the whole subshell in an eval to avoid shfmt breaking it when minifying
             while read -r line; do
                 if [[ "${line::2}" == "01" ]]; then
-                    printf "%b%-10s %b%s%b\n" "$col_container" "$container_id" "$col_reset" "${line:3}" "$col_reset" >&1 || :
+                    printf "%b%-10s %b%s%b\n" "$col_container" "$container_id" \
+                        "$col_reset" "${line:3}" "$col_reset" >&1 || :
                 else
-                    printf "%b%-10s %b%s%b\n" "$col_container" "$container_id" "$col_err" "${line:3}" "$col_reset" >&2 || :
+                    printf "%b%-10s %b%s%b\n" "$col_container" "$container_id" \
+                        "$col_err" "${line:3}" "$col_reset" >&2 || :
                 fi
             done < <(_rnchr_pass_env_args rnchr_container_logs "${_args[@]}" --raw "$container_id") &
 
@@ -722,8 +723,10 @@ rnchr_service_create() {
         return
     elif [[ "$__service_image" == "rancher/external-service" ]]; then
         butl.log_warning "Creating external services is not implented yet"
+        return
     elif [[ "$__service_image" =~ ^rancher/lb-service- ]]; then
         butl.log_warning "Creating load balancer services is not implented yet"
+        return
     fi
 
     _rnchr_pass_env_args rnchr_service_util_to_launch_config "$__service_compose_json" \
@@ -1039,8 +1042,10 @@ rnchr_service_upgrade() {
                 return
             elif [[ "$service_image" == "rancher/external-service" ]]; then
                 butl.log_warning "Updating external services is not implented yet"
+                return
             elif [[ "$service_image" =~ ^rancher/lb-service- ]]; then
                 butl.log_warning "Updating load balancer services is not implented yet"
+                return
             fi
 
             _rnchr_pass_env_args rnchr_service_util_to_launch_config "$service_compose_json" \
@@ -1671,8 +1676,8 @@ rnchr_service_util_to_launch_config() {
     # Build a new json with all the info from docker-compose
     # Most of it is just converting case and making sure there
     # are some non-null defaults when some values are not defined
-    local __launch_config
-    __launch_config=$(jq -Mc \
+    local __service_launch_config
+    __service_launch_config=$(jq -Mc \
         --argjson startOnCreate "$start_on_create" \
         --argjson drainTimeoutMs "$drain_timeout_ms" \
         --argjson milliCpuReservation "$milli_cpu_reservation" \
@@ -1762,9 +1767,9 @@ rnchr_service_util_to_launch_config() {
     }' <<<"$compose") || return
 
     if [[ "$__config_var" ]]; then
-        butl.set_var "$__config_var" "$__launch_config"
+        butl.set_var "$__config_var" "$__service_launch_config"
     else
-        echo "$__launch_config"
+        echo "$__service_launch_config"
     fi
 }
 

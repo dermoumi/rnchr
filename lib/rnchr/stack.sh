@@ -1389,7 +1389,8 @@ rnchr_stack_up() {
                         remote_service_is_rancher_image=1
 
                         if [[ "$service_image" =~ ^rancher/(dns-service|external-service)$ ]]; then
-                            remote_service_compose=$(jq -Mrc 'del(.labels)' <<<"$remote_service_compose")
+                            remote_service_compose=$(jq -Mrc 'del(.labels) | del(.tty) | del(.stdin)' \
+                                <<<"$remote_service_compose")
                         fi
                     fi
 
@@ -1398,7 +1399,8 @@ rnchr_stack_up() {
                         service_is_rancher_image=1
 
                         if [[ "$service_image" =~ ^rancher/(dns-service|external-service)$ ]]; then
-                            service_compose=$(jq -Mrc 'del(.labels)' <<<"$service_compose")
+                            service_compose=$(jq -Mrc 'del(.labels) | del(.tty) | del(.stdin)' \
+                                <<<"$service_compose")
                         fi
                     fi
 
@@ -1449,7 +1451,7 @@ rnchr_stack_up() {
             local service_image
             service_image=$(jq -Mr '.image' <<<"$service_compose") || return
 
-            _rnchr_pass_env_args rnchr_service_create "$stack_id/$service" \
+            _rnchr_pass_env_args rnchr_service_create "$stack_id/$service" --silent \
                 --service-compose-json "$service_compose" --no-update-links || return
         done
     fi
@@ -1501,10 +1503,10 @@ rnchr_stack_up() {
         local stacks_list=${json_map[0]}
         local services_list=${json_map[1]}
 
-        for service_id in "${recreate_services[@]}" "${create_services[@]}" "${upgrade_services[@]}"; do
-            local service
-            service=$(jq -Mr --arg service "$service_id" \
-                '.[] | select(.id == $service) | .name' <<<"$remote_services") || return
+        for service in "${recreate_services[@]}" "${create_services[@]}" "${upgrade_services[@]}"; do
+            local service_id
+            service_id=$(jq -Mr --arg service "$service" \
+                '.[] | select(.name == $service) | .id' <<<"$remote_services") || return
 
             local service_compose
             service_compose=$(jq -Mc --arg service "$service" \
@@ -1527,6 +1529,13 @@ rnchr_stack_up() {
         for service_id in "${upgraded_service_ids[@]}"; do
             _rnchr_pass_env_args rnchr_service_finish_upgrade "$service_id" \
                 --timeout "$finish_upgrade_timeout" || return
+        done
+    fi
+
+    if ! ((no_create)) && ((${#create_services[@]} + ${#recreate_services[@]})); then
+        butl.log_info "Waiting for all services to become upgradable again..."
+        for service in "${recreate_services[@]}" "${create_services[@]}"; do
+            _rnchr_pass_env_args rnchr_service_make_upgradable "$stack_id/$service" || return
         done
     fi
 
