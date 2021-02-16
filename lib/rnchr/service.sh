@@ -238,7 +238,7 @@ rnchr_service_remove() {
     _rnchr_pass_env_args rnchr_service_get_id --id-var service_id "$service" || return
 
     butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
-        "services/$service" -X DELETE || return
+        "services/$service_id" -X DELETE || return
 
     if ((await)); then
         rnchr_service_wait_for_containers_to_stop "$service_id"
@@ -582,36 +582,46 @@ rnchr_service_logs() {
 
 rnchr_service_create() {
     _rnchr_env_args
-    barg.arg stack_service \
+    barg.arg __stack_service \
         --required \
         --value=STACK/NAME \
         --desc="Service and stack names"
-    barg.arg launch_config \
-        --long=launch-config \
-        --value=LAUNCH_CONFIG \
-        --desc="Launch config"
-    barg.arg service_compose_json \
+    barg.arg __service_compose_json \
         --long=service-compose-json \
         --value=SERVICE_COMPOSE \
         --desc="Service compose JSON"
-    barg.arg stack_compose_json \
+    barg.arg __stack_compose_json \
         --long=stack-compose-json \
         --value=STACK_COMPOSE \
         --value=SERVICE \
         --desc="Service from stack compose JSON"
-    barg.arg scale_override \
+    barg.arg __scale_override \
         --long=scale \
         --value=SCALE \
         --desc="Service scale"
-    barg.arg no_start_on_create \
+    barg.arg __no_start_on_create \
         --long=no-start-on-create \
         --desc="If set, service won't start on creation"
-    barg.arg force_start_on_create \
+    barg.arg __force_start_on_create \
         --long=force-start-on-create \
         --desc="If set, forces service to start on creation"
-    barg.arg no_update_links \
+    barg.arg __no_update_links \
         --long=no-update-links \
         --desc="If set, does not upgrade service links after deploying"
+    barg.arg __id_var \
+        --implies=__silent \
+        --value=VARIABLE \
+        --long=id-var \
+        --desc="Shell variable to store the service ID"
+    barg.arg __service_var \
+        --implies=__silent \
+        --value=VARIABLE \
+        --long=stack-var \
+        --desc="Shell variable to store the service JSON"
+    barg.arg __silent \
+        --long=silent \
+        --short=s \
+        --desc="Do not output service JSON after creation"
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -622,14 +632,16 @@ rnchr_service_create() {
     # shellcheck disable=SC2034
     local rancher_env=
 
-    local stack_service=
-    local launch_config=
-    local service_compose_json=
-    local scale_override=
-    local no_start_on_create=
-    local force_start_on_create=
-    local stack_compose_json=()
-    local no_update_links=
+    local __stack_service=
+    local __service_compose_json=
+    local __scale_override=
+    local __no_start_on_create=
+    local __force_start_on_create=
+    local __stack_compose_json=()
+    local __no_update_links=
+    local __id_var=
+    local __service_var=
+    local __silent=
 
     local should_exit=
     local should_exit_err=0
@@ -639,69 +651,108 @@ rnchr_service_create() {
         return "$should_exit_err"
     fi
 
-    if [[ "$stack_service" =~ \/ ]]; then
-        local stack=${stack_service%%\/*}
-        local service=${stack_service##*\/}
+    if [[ "$__stack_service" =~ \/ ]]; then
+        local _stack=${__stack_service%%\/*}
+        local _service=${__stack_service##*\/}
     else
         butl.fail "Name should be <STACK_NAME>/<SERVICE_NAME>"
         return
     fi
 
-    local stack_id
-    _rnchr_pass_env_args rnchr_stack_get_id --id-var stack_id "$stack" || return
-
     local scale=1
     local start_on_create=true
 
-    if [[ ! "$launch_config" ]]; then
-        if [[ ! "$service_compose_json" ]] && ((${#stack_compose_json[@]} > 0)); then
-            local stack_compose=
-            stack_compose=${stack_compose_json[0]}
+    local __launch_config=
 
-            local target_service=
-            target_service=${stack_compose_json[1]}
+    if [[ ! "$__service_compose_json" ]] && ((${#__stack_compose_json[@]} > 0)); then
+        local __stack_compose=
+        __stack_compose=${__stack_compose_json[0]}
 
-            _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
-                "$stack_compose" "$target_service" --compose-var service_compose_json || return
+        local __target_service=
+        __target_service=${__stack_compose_json[1]}
 
-            if [[ ! "$service_compose_json" ]]; then
-                butl.fail "Compose file does not have any entry for service $target_service"
-                return
-            fi
-        fi
+        _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
+            "$__stack_compose" "$__target_service" --compose-var __service_compose_json || return
 
-        if [[ "$service_compose_json" ]]; then
-            _rnchr_pass_env_args rnchr_service_util_to_launch_config "$service_compose_json" \
-                --config-var launch_config || return
-
-            scale=$(jq -Mr '.scale // 1' <<<"$service_compose_json")
-            start_on_create=$(jq -Mr '.start_on_create // true' <<<"$service_compose_json")
+        if [[ ! "$__service_compose_json" ]]; then
+            butl.fail "Compose file does not have any entry for service $__target_service"
+            return
         fi
     fi
 
-    if [[ ! "$launch_config" ]]; then
+    if [[ ! "$__service_compose_json" ]]; then
         butl.fail "No service configuration was supplied"
         return
     fi
 
-    if [[ "$scale_override" ]]; then
-        scale=$scale_override
+    local __service_image
+    __service_image=$(jq -Mr '.image' <<<"$__service_compose_json") || return
+
+    if [[ "$__service_image" == "rancher/dns-service" ]]; then
+        if [[ ! "$__service_compose_json" ]]; then
+            butl.fail "DNS Service creation requires a service-compose JSON"
+            return
+        fi
+
+        local __args=(--service-compose-json "$__service_compose_json")
+
+        if ((__force_start_on_create)); then
+            __args+=(--force-start-on-create)
+        elif ((__no_start_on_create)); then
+            __args+=(--no-start-on-create)
+        fi
+
+        if ((__no_update_links)); then
+            __args+=(--no-update-links)
+        fi
+
+        if [[ "$__id_var" ]]; then
+            __args+=(--id-var "$__id_var")
+        fi
+
+        if [[ "$__service_var" ]]; then
+            __args+=(--service-var "$__service_var")
+        fi
+
+        if [[ "$__silent" ]]; then
+            __args+=(--silent)
+        fi
+
+        _rnchr_pass_env_args rnchr_service_create_dns_service "$__stack_service" "${__args[@]}"
+        return
+    elif [[ "$__service_image" == "rancher/external-service" ]]; then
+        butl.log_warning "Creating external services is not implented yet"
+    elif [[ "$__service_image" =~ ^rancher/lb-service- ]]; then
+        butl.log_warning "Creating load balancer services is not implented yet"
     fi
 
-    if ((force_start_on_create)); then
+    _rnchr_pass_env_args rnchr_service_util_to_launch_config "$__service_compose_json" \
+        --config-var __launch_config || return
+
+    scale=$(jq -Mr '.scale // 1' <<<"$__service_compose_json")
+    start_on_create=$(jq -Mr '.start_on_create // true' <<<"$__service_compose_json")
+
+    if [[ "$__scale_override" ]]; then
+        scale=$__scale_override
+    fi
+
+    if ((__force_start_on_create)); then
         start_on_create=true
-    elif ((no_start_on_create)); then
+    elif ((__no_start_on_create)); then
         start_on_create=false
     fi
 
-    local payload
-    payload=$(
+    local _stack_id
+    _rnchr_pass_env_args rnchr_stack_get_id --id-var _stack_id "$_stack" || return
+
+    local __payload
+    __payload=$(
         jq -Mnc \
-            --arg name "$service" \
+            --arg name "$_service" \
             --argjson scale "$scale" \
             --argjson startOnCreate "$start_on_create" \
-            --arg stackId "$stack_id" \
-            --argjson launchConfig "$launch_config" \
+            --arg stackId "$_stack_id" \
+            --argjson launchConfig "$__launch_config" \
             '{
                 "type": "service",
                 "name": $name,
@@ -714,11 +765,158 @@ rnchr_service_create() {
             }'
     ) || return
 
-    butl.muffle_all _rnchr_pass_env_args rnchr_env_api "/service" -X POST -d "$payload" || return
+    local __response=
+    _rnchr_pass_env_args rnchr_env_api --response-var __response \
+        "/service" -X POST -d "$__payload" || return
 
-    if ! ((no_update_links)) && [[ "$service_compose_json" ]]; then
-        _rnchr_pass_env_args rnchr_service_update_links "$stack_service" \
-            --service-compose-json "$service_compose_json" || return
+    local __service_id
+    __service_id=$(jq -Mr '.id' <<<"$__response")
+
+    if [[ "$__id_var" ]]; then
+
+        butl.set_var "$__id_var" "$__service_id"
+    fi
+
+    if [[ "$__service_var" ]]; then
+        butl.set_var "$__service_var" "$__response"
+    elif ! ((__silent)); then
+        echo "$__response"
+    fi
+
+    if ! ((__no_update_links)) && [[ "$__service_compose_json" ]]; then
+        _rnchr_pass_env_args rnchr_service_update_links "$__service_id" \
+            --service-compose-json "$__service_compose_json" || return
+    fi
+}
+
+rnchr_service_create_dns_service() {
+    _rnchr_env_args
+    barg.arg __stack_service \
+        --required \
+        --value=STACK/NAME \
+        --desc="Service and stack names"
+    barg.arg __service_compose_json \
+        --long=service-compose-json \
+        --value=SERVICE_COMPOSE \
+        --desc="Service compose JSON"
+    barg.arg __stack_compose_json \
+        --long=stack-compose-json \
+        --value=STACK_COMPOSE \
+        --value=SERVICE \
+        --desc="Service from stack compose JSON"
+    barg.arg __no_start_on_create \
+        --long=no-start-on-create \
+        --desc="If set, service won't start on creation"
+    barg.arg __force_start_on_create \
+        --long=force-start-on-create \
+        --desc="If set, forces service to start on creation"
+    barg.arg __no_update_links \
+        --long=no-update-links \
+        --desc="If set, does not upgrade service links after deploying"
+    barg.arg __id_var \
+        --implies=__silent \
+        --value=VARIABLE \
+        --long=id-var \
+        --desc="Shell variable to store the service ID"
+    barg.arg __service_var \
+        --implies=__silent \
+        --value=VARIABLE \
+        --long=stack-var \
+        --desc="Shell variable to store the service JSON"
+    barg.arg __silent \
+        --long=silent \
+        --short=s \
+        --desc="Do not output service JSON after creation"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local __stack_service=
+    local __service_compose_json=
+    local __no_start_on_create=
+    local __force_start_on_create=
+    local __stack_compose_json=()
+    local __no_update_links=
+    local __id_var=
+    local __service_var=
+    local __silent=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    if [[ "$__stack_service" =~ \/ ]]; then
+        local _stack=${__stack_service%%\/*}
+        local _service=${__stack_service##*\/}
+    else
+        butl.fail "Name should be <STACK_NAME>/<SERVICE_NAME>"
+        return
+    fi
+
+    local _stack_id
+    _rnchr_pass_env_args rnchr_stack_get_id --id-var _stack_id "$_stack" || return
+
+    local start_on_create=true
+
+    if [[ ! "$__service_compose_json" ]] && ((${#__stack_compose_json[@]} > 0)); then
+        local stack_compose=
+        stack_compose=${__stack_compose_json[0]}
+
+        local target_service=
+        target_service=${__stack_compose_json[1]}
+
+        _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
+            "$stack_compose" "$target_service" --compose-var __service_compose_json || return
+
+        if [[ ! "$__service_compose_json" ]]; then
+            butl.fail "Compose file does not have any entry for service $target_service"
+            return
+        fi
+    fi
+
+    if [[ ! "$__service_compose_json" ]]; then
+        butl.fail "No service configuration was supplied"
+        return
+    fi
+
+    start_on_create=$(jq -Mr '.start_on_create // true' <<<"$__service_compose_json")
+
+    if ((__force_start_on_create)); then
+        start_on_create=true
+    elif ((__no_start_on_create)); then
+        start_on_create=false
+    fi
+
+    local __payload
+    __payload=$(
+        jq -Mnc \
+            --arg name "$_service" \
+            --argjson startOnCreate "$start_on_create" \
+            --arg stackId "$_stack_id" \
+            '{
+                "type": "dnsService",
+                "name": $name,
+                "stackId": $stackId,
+                "startOnCreate": $startOnCreate,
+                "assignServiceIpAddress": false,
+            }'
+    ) || return
+
+    butl.muffle_all _rnchr_pass_env_args rnchr_env_api "/dnsservice" -X POST -d "$__payload" || return
+
+    if ! ((__no_update_links)); then
+        _rnchr_pass_env_args rnchr_service_update_links "$__service_id" \
+            --service-compose-json "$__service_compose_json" || return
     fi
 }
 
@@ -728,10 +926,6 @@ rnchr_service_upgrade() {
         --required \
         --value=STACK/NAME \
         --desc="Service and stack names"
-    barg.arg launch_config \
-        --long=launch-config \
-        --value=LAUNCH_CONFIG \
-        --desc="Launch config"
     barg.arg service_compose_json \
         --long=service-compose-json \
         --value=SERVICE_COMPOSE \
@@ -785,7 +979,6 @@ rnchr_service_upgrade() {
     local rancher_env=
 
     local stack_service=
-    local launch_config=
     local service_compose_json=
     local batch_size_override=
     local interval_override=
@@ -820,33 +1013,48 @@ rnchr_service_upgrade() {
         local interval_millis=2000
         local start_first=false
 
-        if [[ ! "$launch_config" ]]; then
-            if [[ ! "$service_compose_json" ]] && ((${#stack_compose_json[@]} > 0)); then
-                local stack_compose=
-                stack_compose=${stack_compose_json[0]}
+        local launch_config=
 
-                local target_service=
-                target_service=${stack_compose_json[1]}
+        if [[ ! "$service_compose_json" ]] && ((${#stack_compose_json[@]} > 0)); then
+            local stack_compose=
+            stack_compose=${stack_compose_json[0]}
 
-                _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
-                    "$stack_compose" "$target_service" --compose-var service_compose_json || return
-            fi
+            local target_service=
+            target_service=${stack_compose_json[1]}
 
-            if [[ "$service_compose_json" ]]; then
-                _rnchr_pass_env_args rnchr_service_util_to_launch_config "$service_compose_json" \
-                    --config-var launch_config || return
-
-                batch_size=$(jq -Mr '.upgrade_strategy.batch_size // 1' <<<"$service_compose_json") || return
-                interval_millis=$(jq -Mr '.upgrade_strategy.interval_millis // 2000' <<<"$service_compose_json") || return
-                start_first=$(jq -Mr '.upgrade_strategy.start_first // false' <<<"$service_compose_json") || return
-            fi
+            _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
+                "$stack_compose" "$target_service" --compose-var service_compose_json || return
         fi
 
-        if [[ ! "$launch_config" ]]; then
+        if [[ "$service_compose_json" ]]; then
+            local service_image
+            service_image=$(jq -Mr '.image' <<<"$service_compose_json") || return
+
+            if [[ "$service_image" == "rancher/dns-service" ]]; then
+                if ! ((no_update_links)); then
+                    _rnchr_pass_env_args rnchr_service_update_links "$stack_service" \
+                        --service-compose-json "$service_compose_json" || return
+                fi
+
+                return
+            elif [[ "$service_image" == "rancher/external-service" ]]; then
+                butl.log_warning "Updating external services is not implented yet"
+            elif [[ "$service_image" =~ ^rancher/lb-service- ]]; then
+                butl.log_warning "Updating load balancer services is not implented yet"
+            fi
+
+            _rnchr_pass_env_args rnchr_service_util_to_launch_config "$service_compose_json" \
+                --config-var launch_config || return
+
+            batch_size=$(jq -Mr '.upgrade_strategy.batch_size // 1' <<<"$service_compose_json") || return
+            interval_millis=$(jq -Mr '.upgrade_strategy.interval_millis // 2000' <<<"$service_compose_json") || return
+            start_first=$(jq -Mr '.upgrade_strategy.start_first // false' <<<"$service_compose_json") || return
+        else
+            launch_config=$(jq -Mc '.upgrade.inServiceStrategy.launchConfig' <<<"$service_json") || return
+
             batch_size=$(jq -Mc '.upgrade.inServiceStrategy.batchSize' <<<"$service_json") || return
             interval_millis=$(jq -Mc '.upgrade.inServiceStrategy.intervalMillis' <<<"$service_json") || return
             start_first=$(jq -Mc '.upgrade.inServiceStrategy.startFirst' <<<"$service_json") || return
-            launch_config=$(jq -Mc '.upgrade.inServiceStrategy.launchConfig' <<<"$service_json") || return
         fi
 
         if [[ "$batch_size_override" ]]; then
@@ -931,7 +1139,11 @@ rnchr_service_finish_upgrade() {
     local service_id
     _rnchr_pass_env_args rnchr_service_get_id --id-var service_id "$stack_service" || return
 
-    if [[ "$timeout" ]] && ! _rnchr_pass_env_args rnchr_service_has_action "$service_id" upgrade; then
+    if _rnchr_pass_env_args rnchr_service_has_action "$service_id" upgrade; then
+        return
+    fi
+
+    if [[ "$timeout" ]]; then
         butl.timeout "$timeout" \
             _rnchr_pass_env_args rnchr_service_wait_for_action "$service_id" finishupgrade || return
     else
@@ -956,6 +1168,14 @@ rnchr_service_update_links() {
         --value=STACK_COMPOSE \
         --value=SERVICE \
         --desc="Service from stack compose JSON"
+    barg.arg _use_stack_list \
+        --hidden \
+        --long=use-stack-list \
+        --value=JSON
+    barg.arg _use_service_list \
+        --hidden \
+        --long=use-service-list \
+        --value=JSON
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -969,6 +1189,9 @@ rnchr_service_update_links() {
     local stack_service=
     local service_compose_json=
     local stack_compose_json=()
+
+    local _use_stack_list=
+    local _use_service_list=
 
     local should_exit=
     local should_exit_err=0
@@ -1009,14 +1232,28 @@ rnchr_service_update_links() {
         # preload rancher env ID before running co_run
         _rnchr_pass_args rnchr_env_get_id "$rancher_env" >/dev/null || return
 
-        # Retrieve stacks and services lists
-        local json_map=()
-        butl.co_run json_map \
-            "_rnchr_pass_env_args rnchr_stack_list" \
-            "_rnchr_pass_env_args rnchr_service_list" || return
+        local stacks_list=
+        local services_list=
 
-        local stacks_list=${json_map[0]}
-        local services_list=${json_map[1]}
+        if [[ "$_use_service_list" && "$_use_stack_list" ]]; then
+            stacks_list=$_use_stack_list
+            services_list=$_use_service_list
+        elif [[ "$_use_service_list" ]]; then
+            services_list=$_use_service_list
+            _rnchr_pass_env_args rnchr_stack_list --stacks-var stack_list || return
+        elif [[ "$_use_stack_list" ]]; then
+            stacks_list=$_use_stack_list
+            _rnchr_pass_env_args rnchr_service_list --services-var service_list || return
+        else
+            # Retrieve stacks and services lists
+            local json_map=()
+            butl.co_run json_map \
+                "_rnchr_pass_env_args rnchr_stack_list" \
+                "_rnchr_pass_env_args rnchr_service_list" || return
+
+            stacks_list=${json_map[0]}
+            services_list=${json_map[1]}
+        fi
 
         # Retrieve stack and service info
         local service_id=
@@ -1390,6 +1627,10 @@ rnchr_service_util_to_launch_config() {
         return "$should_exit_err"
     fi
 
+    # shellcheck disable=2001
+    compose=$(sed 's/\$\$/\$/g' <<<"$compose") # faster on big strings?
+    # compose=${compose//\$\$/\$}
+
     butl.log_debug "Converting service compose to rancher launch config"
 
     # Need to reference secrets by their IDs, so we fetch all of them from rancher and match
@@ -1655,4 +1896,13 @@ rnchr_service_util_extract_service_compose() {
     else
         echo "$__extracted_json"
     fi
+}
+
+rnchr_service_util_normalize_compose_json() {
+    jq -MS "$@" '
+        .links = ((.links // []) | sort)
+        | .external_links = ((.external_links // []) | sort)
+        | .secrets = ((.secrets // []) | sort_by(.target))
+        | .ports = ((.ports // []) | sort)
+    '
 }
