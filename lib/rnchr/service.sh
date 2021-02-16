@@ -30,6 +30,7 @@ rnchr_service_list() {
     _rnchr_pass_env_args rnchr_env_api \
         --response-var _response \
         "services" --get \
+        --data-urlencode "removed_null=1" \
         --data-urlencode "limit=-1" || return
 
     local __services_list
@@ -97,6 +98,7 @@ rnchr_service_get() {
             --response-var _services_json \
             "services" --get \
             --data-urlencode "id=${_service#1s}" \
+            --data-urlencode "removed_null=1" \
             --data-urlencode "limit=-1" || return
 
         if [[ "$_services_json" && "$(jq -Mr '.data | length' <<<"$_services_json")" -ne 0 ]]; then
@@ -404,8 +406,9 @@ rnchr_service_exists() {
         local response=
         _rnchr_pass_env_args rnchr_env_api \
             --response-var response \
-            "services" \
-            --get --data-urlencode "id=${service#1s}" || return
+            "services" --get \
+            --data-urlencode "removed_null=1" \
+            --data-urlencode "id=${service#1s}" || return
 
         if [[ "$response" && "$(jq -Mr '.data | length' <<<"$response")" -ne 0 ]]; then
             local service_json=

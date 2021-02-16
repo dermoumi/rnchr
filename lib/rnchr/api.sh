@@ -17,6 +17,17 @@ rnchr_api() {
         --long=response-var \
         --value=variable \
         --desc="Set the shell variable instead"
+    barg.arg __method \
+        --long=request \
+        --short=X \
+        --value=METHOD \
+        --default=GET \
+        --desc="Method to use to send the request"
+    barg.arg __payload \
+        --long=data \
+        --short=d \
+        --value=JSON \
+        --desc="Payload to send to the API"
 
     local rancher_url=
     local rancher_access_key=
@@ -24,7 +35,16 @@ rnchr_api() {
     local __rnchr_endpoint=
     local __rnchr_args=()
     local __rnchr_response_var=
+    local __method=
+    local __payload=
+
+    local should_exit=
+    local should_exit_err=0
     barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
 
     __rnchr_endpoint=${__rnchr_endpoint#/}
 
@@ -51,7 +71,11 @@ rnchr_api() {
         return
     fi
 
-    butl.log_debug "curl: $__rnchr_url"
+    butl.log_debug "curl: $__method $__rnchr_url"
+
+    if [[ "$__payload" ]]; then
+        __rnchr_args+=(-d "$__payload")
+    fi
 
     local __rnchr_response
     __rnchr_response=$(curl -sSL \
@@ -60,6 +84,7 @@ rnchr_api() {
         --compressed \
         -H 'Accept: application/json' \
         -H 'Content-Type: application/json' \
+        -X "$__method" \
         "${__rnchr_args[@]}" "${__rnchr_url}") || return
 
     local __rnchr_http_code=
@@ -76,7 +101,7 @@ rnchr_api() {
         return
     fi
 
-    rnchr_handle_err "$__rnchr_response"
+    rnchr_handle_err "$__rnchr_response" "$__payload"
 }
 
 rnchr_env_api() {
@@ -120,6 +145,7 @@ rnchr_env_api() {
 
 rnchr_handle_err() {
     local json=$1
+    local payload=$2
 
     local type=
     type=$(jq -Mr .type <<<"$json" 2>/dev/null) || {
@@ -137,14 +163,24 @@ rnchr_handle_err() {
         local field_name=
         field_name=$(jq -Mr '.fieldName | select(. != null)' <<<"$json")
 
+        local field_value=
+        if [[ "$field_name" ]]; then
+            local value=
+            value=$(jq -Mr ".$field_name" <<<"$payload") || true
+
+            if [[ "$value" ]]; then
+                field_value=": $value"
+            fi
+        fi
+
         case "$code" in
         NotUnique)
-            : "API error ($status): Field '${BUTL_ANSI_UNDERLINE}$field_name${BUTL_ANSI_RESET_UNDERLINE}'"
+            : "API error ($status): Field ${BUTL_ANSI_UNDERLINE}$field_name$field_value${BUTL_ANSI_RESET_UNDERLINE}"
             butl.fail "$_ is not unique"
             return
             ;;
         InvalidCharacters)
-            : "API error ($status): Field '${BUTL_ANSI_UNDERLINE}$field_name${BUTL_ANSI_RESET_UNDERLINE}'"
+            : "API error ($status): Field ${BUTL_ANSI_UNDERLINE}$field_name$field_value${BUTL_ANSI_RESET_UNDERLINE}"
             butl.fail "$_ contains invalid characters"
             return
             ;;
@@ -153,12 +189,12 @@ rnchr_handle_err() {
             return
             ;;
         MinLengthExceeded)
-            : "API error ($status): Field '${BUTL_ANSI_UNDERLINE}$field_name${BUTL_ANSI_RESET_UNDERLINE}'"
+            : "API error ($status): Field ${BUTL_ANSI_UNDERLINE}$field_name$field_value${BUTL_ANSI_RESET_UNDERLINE}"
             butl.fail "$_ minimum length is not reached"
             return
             ;;
         MaxLengthExceeded)
-            : "API error ($status): Field '${BUTL_ANSI_UNDERLINE}$field_name${BUTL_ANSI_RESET_UNDERLINE}'"
+            : "API error ($status): Field ${BUTL_ANSI_UNDERLINE}$field_name$field_value${BUTL_ANSI_RESET_UNDERLINE}"
             butl.fail "$_ maximum length is exceeded"
             return
             ;;

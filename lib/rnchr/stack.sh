@@ -33,6 +33,7 @@ rnchr_stack_list() {
     _rnchr_pass_env_args rnchr_env_api \
         --response-var _response \
         "stacks" --get \
+        --data-urlencode "removed_null=1" \
         --data-urlencode "limit=-1" || return
 
     local __stacks_list
@@ -88,6 +89,7 @@ rnchr_stack_get() {
         --response-var response \
         "stacks" --get \
         --data-urlencode "$query" \
+        --data-urlencode "removed_null=1" \
         --data-urlencode "limit=-1" || return
 
     if [[ "$response" && "$(jq -Mr '.data | length' <<<"$response")" -gt 0 ]]; then
@@ -511,10 +513,18 @@ rnchr_stack_remove() {
 
 rnchr_stack_exists() {
     _rnchr_env_args
-    barg.arg name \
+    barg.arg __stack \
         --required \
         --value=STACK \
         --desc="Stack to inspect"
+    barg.arg __stack_var \
+        --long=stack-var \
+        --value=VARIABLE \
+        --desc="Shell variable to store the stack json in"
+    barg.arg __id_var \
+        --long=id-var \
+        --value=VARIABLE \
+        --desc="Shell variable to store the stack id in"
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -525,7 +535,9 @@ rnchr_stack_exists() {
     # shellcheck disable=SC2034
     local rancher_env=
 
-    local name=
+    local __stack=
+    local __stack_var=
+    local __id_var=
 
     local should_exit=
     local should_exit_err=0
@@ -535,19 +547,37 @@ rnchr_stack_exists() {
         return "$should_exit_err"
     fi
 
-    local query=
-    if [[ "$name" =~ ^1st[[:digit:]]+ ]]; then
-        query="id=${name#1st}"
+    local __query=
+    if [[ "$__stack" =~ ^1st[[:digit:]]+ ]]; then
+        __query="id=${__stack#1st}"
     else
-        query="name=$name"
+        __query="name=$__stack"
     fi
 
-    local response=
+    local __response=
     _rnchr_pass_env_args rnchr_env_api \
-        --response-var response \
-        "stacks" --get --data-urlencode "$query" || return
+        --response-var __response \
+        "stacks" --get \
+        --data-urlencode "removed_null=1" \
+        --data-urlencode "$__query" || return
 
-    [[ "$response" && "$(jq -Mr '.data[0] | select(. != null)' <<<"$response")" ]]
+    local __stack_json=
+    __stack_json=$(jq -Mc '.data[0] | select(. != null)' <<<"$__response") || return
+
+    if [[ ! "$__stack_json" ]]; then
+        return 1
+    fi
+
+    if [[ "$__stack_var" ]]; then
+        butl.set_var "$__stack_var" "$__stack_json"
+    fi
+
+    if [[ "$__id_var" ]]; then
+        local __stack_id
+        __stack_id=$(jq -Mr '.id' <<<"$__stack_json") || return
+
+        butl.set_var "$__id_var" "$__stack_id"
+    fi
 }
 
 rnchr_stack_wait_for_containers_to_stop() {
@@ -640,6 +670,10 @@ rnchr_stack_update_meta() {
         --long=tags \
         --short=t \
         --desc="Comma separated tags to set for the stack"
+    barg.arg _use_stack_json \
+        --hidden \
+        --value=JSON \
+        --long=use-stack-json
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -654,6 +688,7 @@ rnchr_stack_update_meta() {
     local name="__RNCHR_STACK_DEFAULT_NAME"
     local desc="__RNCHR_STACK_DEFAULT_DESCRIPTION"
     local tags="__RNCHR_STACK_DEFAULT_TAG"
+    local _use_stack_json=
 
     local should_exit=
     local should_exit_err=0
@@ -664,29 +699,42 @@ rnchr_stack_update_meta() {
     fi
 
     local stack_json=
-    _rnchr_pass_env_args rnchr_stack_get --stack-var stack_json "$stack" || return
+    if [[ "$_use_stack_json" ]]; then
+        stack_json=$_use_stack_json
+    else
+        _rnchr_pass_env_args rnchr_stack_get --stack-var stack_json "$stack" || return
+    fi
 
     local stack_id=
     stack_id=$(jq -Mr '.id' <<<"$stack_json") || return
 
     local payload="{}"
 
-    local remote_name
-    remote_name="$(jq -Mr '.name' <<<"$stack_json")" || return
-    if [[ "$name" != "__RNCHR_STACK_DEFAULT_NAME" && "$name" != "$remote_name" ]]; then
-        payload=$(jq -Mc --arg name "$name" '.name = $name' <<<"$payload")
+    if [[ "$name" != "__RNCHR_STACK_DEFAULT_NAME" ]]; then
+        local remote_name
+        remote_name="$(jq -Mr '.name' <<<"$stack_json")" || return
+
+        if [[ "$name" != "$remote_name" ]]; then
+            payload=$(jq -Mc --arg name "$name" '.name = $name' <<<"$payload")
+        fi
     fi
 
-    local remote_desc
-    remote_desc="$(jq -Mr '.description' <<<"$stack_json")" || return
-    if [[ "$desc" != "__RNCHR_STACK_DEFAULT_DESCRIPTION" && "$desc" != "$remote_desc" ]]; then
-        payload=$(jq -Mc --arg desc "$desc" '.description = $desc' <<<"$payload")
+    if [[ "$desc" != "__RNCHR_STACK_DEFAULT_DESCRIPTION" ]]; then
+        local remote_desc
+        remote_desc="$(jq -Mr '.description' <<<"$stack_json")" || return
+
+        if [[ "$desc" != "$remote_desc" ]]; then
+            payload=$(jq -Mc --arg desc "$desc" '.description = $desc' <<<"$payload")
+        fi
     fi
 
-    local remote_tags
-    remote_tags="$(jq -Mr '.group' <<<"$stack_json")" || return
-    if [[ "$tags" != "__RNCHR_STACK_DEFAULT_TAG" && "$tags" != "$remote_tags" ]]; then
-        payload=$(jq -Mc --arg tags "$tags" '.group = $tags' <<<"$payload")
+    if [[ "$tags" != "__RNCHR_STACK_DEFAULT_TAG" ]]; then
+        local remote_tags
+        remote_tags="$(jq -Mr '.group' <<<"$stack_json")" || return
+
+        if [[ "$tags" != "$remote_tags" ]]; then
+            payload=$(jq -Mc --arg tags "$tags" '.group = $tags' <<<"$payload")
+        fi
     fi
 
     if [[ "$payload" == "{}" ]]; then
@@ -1176,5 +1224,63 @@ rnchr_stack_ensure_secrets_mounted() {
 
         _rnchr_pass_env_args rnchr_stack_ensure_secrets_mounted "$stack" --compose-json "$compose_json" \
             "${affected_services[@]}" || return
+    fi
+}
+
+rnchr_stack_up() {
+    _rnchr_env_args
+    barg.arg stack \
+        --required \
+        --value=NAME \
+        --desc="Stack name"
+    barg.arg desc \
+        --value=DESCRIPTION \
+        --long=desc \
+        --short=d \
+        --desc="New description to set for the stack"
+    barg.arg tags \
+        --value=TAGS \
+        --long=tags \
+        --short=t \
+        --desc="Comma separated tags to set for the stack"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local stack=
+    local desc="__RNCHR_STACK_DEFAULT_DESCRIPTION"
+    local tags="__RNCHR_STACK_DEFAULT_TAG"
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local meta_args=()
+    if [[ "$desc" != "__RNCHR_STACK_DEFAULT_DESCRIPTION" ]]; then
+        meta_args+=(--desc "$desc")
+    fi
+    if [[ "$tags" != "__RNCHR_STACK_DEFAULT_TAG" ]]; then
+        meta_args+=(--tags "$tags")
+    fi
+
+    local stack_id=
+    local stack_json=
+    if _rnchr_pass_env_args rnchr_stack_exists "$stack" --id-var stack_id --stack-var stack_json; then
+        if ((${#meta_args[@]})); then
+            _rnchr_pass_env_args rnchr_stack_update_meta --use-stack-json "$stack_json" \
+                "$stack_id" "${meta_args[@]}" || return
+        fi
+    else
+        _rnchr_pass_env_args rnchr_stack_create "$stack" "${meta_args[@]}" || return
     fi
 }

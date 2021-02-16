@@ -47,8 +47,9 @@ rnchr_container_get() {
         local __response=
         _rnchr_pass_env_args rnchr_env_api \
             --response-var __response \
-            "containers" \
-            --get --data-urlencode "$query" || return
+            "containers" --get \
+            --data-urlencode "removed_null=1" \
+            --data-urlencode "$query" || return
 
         if [[ "$__response" && "$(jq -Mr '.data | length' <<<"$__response")" -ne 0 ]]; then
             __container_json=$(jq -Mr '.data[0] | select(. != null)' <<<"$__response")
@@ -104,8 +105,9 @@ rnchr_container_get_id() {
         local __response=
         _rnchr_pass_env_args rnchr_env_api \
             --response-var __response \
-            "containers" \
-            --get --data-urlencode "name=$name" || return
+            "containers" --get \
+            --data-urlencode "removed_null=1" \
+            --data-urlencode "name=$name" || return
 
         if [[ "$__response" && "$(jq -Mr '.data | length' <<<"$__response")" -ne 0 ]]; then
             __container_id=$(jq -Mr '.data[0].id | select(. != null)' <<<"$__response")
@@ -188,6 +190,7 @@ rnchr_container_list() {
     _rnchr_pass_env_args rnchr_env_api \
         --response-var _response \
         "containers" --get \
+        --data-urlencode "removed_null=1" \
         "${params[@]}" || return
 
     local _containers
