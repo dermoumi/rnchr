@@ -152,6 +152,16 @@ rnchr_handle_err() {
             butl.fail "API error ($status): Action not available"
             return
             ;;
+        MinLengthExceeded)
+            : "API error ($status): Field '${BUTL_ANSI_UNDERLINE}$field_name${BUTL_ANSI_RESET_UNDERLINE}'"
+            butl.fail "$_ minimum length is not reached"
+            return
+            ;;
+        MaxLengthExceeded)
+            : "API error ($status): Field '${BUTL_ANSI_UNDERLINE}$field_name${BUTL_ANSI_RESET_UNDERLINE}'"
+            butl.fail "$_ maximum length is exceeded"
+            return
+            ;;
         esac
 
         if [[ "$message" ]]; then

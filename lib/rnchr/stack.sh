@@ -566,6 +566,59 @@ rnchr_stack_wait_for_containers_to_stop() {
     done
 }
 
+rnchr_stack_create() {
+    _rnchr_env_args
+    barg.arg stack \
+        --required \
+        --value=NAME \
+        --desc="Stack name"
+    barg.arg desc \
+        --value=DESCRIPTION \
+        --long=desc \
+        --short=d \
+        --desc="New description to set for the stack"
+    barg.arg tags \
+        --value=TAGS \
+        --long=tags \
+        --short=t \
+        --desc="Comma separated tags to set for the stack"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local stack=
+    local desc="__RNCHR_STACK_DEFAULT_DESCRIPTION"
+    local tags="__RNCHR_STACK_DEFAULT_TAG"
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local payload=
+    payload=$(jq -Mnc --arg name "$stack" '{"name": $name}')
+
+    if [[ "$desc" != "__RNCHR_STACK_DEFAULT_DESCRIPTION" ]]; then
+        payload=$(jq -Mc --arg desc "$desc" '.description = $desc' <<<"$payload")
+    fi
+
+    if [[ "$tags" != "__RNCHR_STACK_DEFAULT_TAG" ]]; then
+        payload=$(jq -Mc --arg tags "$tags" '.group = $tags' <<<"$payload")
+    fi
+
+    butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
+        "stacks" -X POST -d "$payload" || return
+}
+
 rnchr_stack_update_meta() {
     _rnchr_env_args
     barg.arg stack \
@@ -610,26 +663,38 @@ rnchr_stack_update_meta() {
         return "$should_exit_err"
     fi
 
-    local _stack_id=
-    _rnchr_pass_env_args rnchr_stack_get_id --id-var _stack_id "$stack" || return
+    local stack_json=
+    _rnchr_pass_env_args rnchr_stack_get --stack-var stack_json "$stack" || return
+
+    local stack_id=
+    stack_id=$(jq -Mr '.id' <<<"$stack_json") || return
 
     local payload="{}"
-    if [[ "$name" != "__RNCHR_STACK_DEFAULT_NAME" ]]; then
-        payload=$(jq --arg name "$name" -Mc '.name = $name' <<<"$payload")
+
+    local remote_name
+    remote_name="$(jq -Mr '.name' <<<"$stack_json")" || return
+    if [[ "$name" != "__RNCHR_STACK_DEFAULT_NAME" && "$name" != "$remote_name" ]]; then
+        payload=$(jq -Mc --arg name "$name" '.name = $name' <<<"$payload")
     fi
-    if [[ "$desc" != "__RNCHR_STACK_DEFAULT_DESCRIPTION" ]]; then
-        payload=$(jq --arg desc "$desc" -Mc '.description = $desc' <<<"$payload")
+
+    local remote_desc
+    remote_desc="$(jq -Mr '.description' <<<"$stack_json")" || return
+    if [[ "$desc" != "__RNCHR_STACK_DEFAULT_DESCRIPTION" && "$desc" != "$remote_desc" ]]; then
+        payload=$(jq -Mc --arg desc "$desc" '.description = $desc' <<<"$payload")
     fi
-    if [[ "$tags" != "__RNCHR_STACK_DEFAULT_TAG" ]]; then
-        payload=$(jq --arg tags "$tags" -Mc '.group = $tags' <<<"$payload")
+
+    local remote_tags
+    remote_tags="$(jq -Mr '.group' <<<"$stack_json")" || return
+    if [[ "$tags" != "__RNCHR_STACK_DEFAULT_TAG" && "$tags" != "$remote_tags" ]]; then
+        payload=$(jq -Mc --arg tags "$tags" '.group = $tags' <<<"$payload")
     fi
+
     if [[ "$payload" == "{}" ]]; then
-        butl.fail "No changes to apply"
         return
     fi
 
     butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
-        "stacks/$_stack_id" -X PUT -d "$payload" || return
+        "stacks/$stack_id" -X PUT -d "$payload" || return
 }
 
 rnchr_stack_wait_for_service_action() {
