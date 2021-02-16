@@ -944,6 +944,13 @@ rnchr_stack_upgrade_services() {
         return "$should_exit_err"
     fi
 
+    local stack_id=
+    _rnchr_pass_env_args rnchr_stack_get_id --id-var stack_id "$stack" || return
+
+    if [[ ! "$compose_json" ]]; then
+        _rnchr_pass_env_args rnchr_stack_get_config "$stack_id" --merged-json-var compose_json || return
+    fi
+
     if ((${#services[@]} == 0)); then
         local services_lines
         services_lines=$(jq -Mr '.services | to_entries[] | .key' <<<"$compose_json") || return
@@ -958,7 +965,7 @@ rnchr_stack_upgrade_services() {
     butl.log_info "Upgrading $stack services: $(butl.join_by ' ' "${services[@]}")"
 
     local stack_services
-    _rnchr_pass_env_args rnchr_stack_get_services "$stack" --services-var stack_services || return
+    _rnchr_pass_env_args rnchr_stack_get_services "$stack_id" --services-var stack_services || return
 
     local service
     local service_id
