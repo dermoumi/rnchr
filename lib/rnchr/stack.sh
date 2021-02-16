@@ -1020,6 +1020,9 @@ rnchr_stack_ensure_secrets_mounted() {
         --long=finish-upgrade-timeout \
         --value=SECONDS \
         --desc="Finishes upgrade but fails if exceeds given time"
+    barg.arg no_fix \
+        --long=no-fix \
+        --desc="Do not attempt to fix the service"
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -1034,6 +1037,7 @@ rnchr_stack_ensure_secrets_mounted() {
     local services=()
     local compose_json=
     local finish_upgrade_timeout=
+    local no_fix=
 
     local should_exit=
     local should_exit_err=0
@@ -1084,6 +1088,12 @@ rnchr_stack_ensure_secrets_mounted() {
     fi
 
     if ((${#affected_services[@]})); then
+        if ((no_fix)); then
+            : "$(butl.join_by ', ' "${affected_services[@]}")"
+            butl.log_error "Stack $stack has services with no secrets mounted: $_"
+            return 1
+        fi
+
         : "$(butl.join_by ', ' "${affected_services[@]}")"
         butl.log_error "Stack $stack has services with no secrets mounted: $_, re-deploying..."
 
