@@ -974,9 +974,13 @@ rnchr_stack_upgrade_services() {
         fi
         service_ids+=("$service_id")
 
+        local service_compose
+        _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
+            "$compose_json" "$service" --compose-var service_compose || return
+
         co_run_commands+=("$(
             printf '%q ' _rnchr_pass_env_args rnchr_service_upgrade "$service_id" \
-                --stack-compose-json "$compose_json" "$service"
+                --service-compose-json "$service_compose"
         )")
     done
 

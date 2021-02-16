@@ -658,8 +658,8 @@ rnchr_service_create() {
             local target_service=
             target_service=${stack_compose_json[1]}
 
-            service_compose_json=$(jq -Mc --arg service "$target_service" \
-                '.services[$service] | select(. != null)' <<<"$stack_compose") || return
+            _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
+                "$stack_compose" "$target_service" --compose-var service_compose_json || return
 
             if [[ ! "$service_compose_json" ]]; then
                 butl.fail "Compose file does not have any entry for service $target_service"
@@ -808,8 +808,8 @@ rnchr_service_upgrade() {
             local target_service=
             target_service=${stack_compose_json[1]}
 
-            service_compose_json=$(jq -Mc --arg service "$target_service" \
-                '.services[$service] | select(. != null)' <<<"$stack_compose") || return
+            _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
+                "$stack_compose" "$target_service" --compose-var service_compose_json || return
 
             if [[ ! "$service_compose_json" ]]; then
                 butl.fail "Compose file does not have any entry for service $target_service"
@@ -964,8 +964,8 @@ rnchr_service_update_links() {
         local target_service=
         target_service=${stack_compose_json[1]}
 
-        service_compose_json=$(jq -Mc --arg service "$target_service" \
-            '.services[$service] | select(. != null)' <<<"$stack_compose") || return
+        _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
+            "$stack_compose" "$target_service" --compose-var service_compose_json || return
 
         if [[ ! "$service_compose_json" ]]; then
             butl.fail "Compose file does not have any entry for service $target_service"
@@ -1503,5 +1503,57 @@ rnchr_service_util_reference_secrets() {
         butl.set_var "$__secrets_var" "$__secrets"
     else
         echo "$__secrets"
+    fi
+}
+
+rnchr_service_util_extract_service_compose() {
+    _rnchr_env_args
+    barg.arg __compose \
+        --required \
+        --value=COMPOSE \
+        --desc="Stack compose JSON"
+    barg.arg __service \
+        --required \
+        --value=SERVICE \
+        --desc="Service to extract from stack compose JSON"
+    barg.arg __compose_var \
+        --long=compose-var \
+        --value=VARIABLE \
+        --desc="Shell variable to store the service compose json into"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local __compose=
+    local __service=
+    local __compose_var=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local __extracted_json
+    __extracted_json=$(jq -Mc --arg service "$__service" \
+        '.services[$service] | select(. != null)' <<<"$__compose") || return
+
+    if [[ ! "$__extracted_json" ]]; then
+        butl.fail "Stack compose file does not contain any definition for service $__service"
+        return
+    fi
+
+    if [[ "$__compose_var" ]]; then
+        butl.set_var "$__compose_var" "$__extracted_json"
+    else
+        echo "$__extracted_json"
     fi
 }
