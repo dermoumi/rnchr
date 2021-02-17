@@ -56,6 +56,10 @@ rnchr_stack_get() {
         --long=stack-var \
         --value=variable \
         --desc="Set the shell variable instead"
+    barg.arg _use_stack_list \
+        --hidden \
+        --long=use-stack-list \
+        --value=JSON
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -68,6 +72,7 @@ rnchr_stack_get() {
 
     local name=
     local stack_var=
+    local _use_stack_list=
 
     local should_exit=
     local should_exit_err=0
@@ -77,34 +82,44 @@ rnchr_stack_get() {
         return "$should_exit_err"
     fi
 
-    local query=
-    if [[ "$name" =~ ^1st[[:digit:]]+ ]]; then
-        query="id=${name#1st}"
+    local __list_stack=
+
+    if [[ "$_use_stack_list" ]]; then
+        if [[ "$name" =~ ^1st[[:digit:]]+ ]]; then
+            __list_stack=$(jq -Mc --arg id "$name" '.[] | select(.id == $id)' <<<"$_use_stack_list") || return
+        else
+            __list_stack=$(jq -Mc --arg name "$name" '.[] | select(.name == $name)' <<<"$_use_stack_list") || return
+        fi
     else
-        query="name=$name"
+        local query=
+        if [[ "$name" =~ ^1st[[:digit:]]+ ]]; then
+            query="id=${name#1st}"
+        else
+            query="name=$name"
+        fi
+
+        local response=
+        _rnchr_pass_env_args rnchr_env_api \
+            --response-var response \
+            "stacks" --get \
+            --data-urlencode "$query" \
+            --data-urlencode "removed_null=1" \
+            --data-urlencode "limit=-1" || return
+
+        if [[ "$response" && "$(jq -Mr '.data | length' <<<"$response")" -gt 0 ]]; then
+            local __list_stack
+            __list_stack=$(jq -Mc '.data[0] | select(. != null)' <<<"$response") || return
+        fi
     fi
 
-    local response=
-    _rnchr_pass_env_args rnchr_env_api \
-        --response-var response \
-        "stacks" --get \
-        --data-urlencode "$query" \
-        --data-urlencode "removed_null=1" \
-        --data-urlencode "limit=-1" || return
-
-    if [[ "$response" && "$(jq -Mr '.data | length' <<<"$response")" -gt 0 ]]; then
-        local __stack_json
-        __stack_json=$(jq -Mc '.data[0] | select(. != null)' <<<"$response") || return
-
-        if [[ "$__stack_json" ]]; then
-            if [[ "$stack_var" ]]; then
-                butl.set_var "$stack_var" "$__stack_json"
-            else
-                echo "$__stack_json"
-            fi
-
-            return
+    if [[ "$__list_stack" ]]; then
+        if [[ "$stack_var" ]]; then
+            butl.set_var "$stack_var" "$__list_stack"
+        else
+            echo "$__list_stack"
         fi
+
+        return
     fi
 
     butl.fail "Stack ${BUTL_ANSI_UNDERLINE}$name${BUTL_ANSI_RESET_UNDERLINE} not found"
@@ -120,6 +135,10 @@ rnchr_stack_get_services() {
         --long=services-var \
         --value=variable \
         --desc="Set the shell variable instead"
+    barg.arg _use_stack_list \
+        --hidden \
+        --long=use-stack-list \
+        --value=JSON
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -132,6 +151,7 @@ rnchr_stack_get_services() {
 
     local name=
     local services_var=
+    local _use_stack_list=
 
     local should_exit=
     local should_exit_err=0
@@ -142,7 +162,7 @@ rnchr_stack_get_services() {
     fi
 
     local _stack_id=
-    _rnchr_pass_env_args rnchr_stack_get_id --id-var _stack_id "$name" || return
+    _rnchr_pass_env_args rnchr_stack_get_id --id-var _stack_id --use-stack-list "$_use_stack_list" "$name" || return
 
     local response=
     _rnchr_pass_env_args rnchr_env_api \
@@ -242,6 +262,10 @@ rnchr_stack_get_id() {
         --long=id-var \
         --value=VARIABLE \
         --desc="Shell variable to store the ID in"
+    barg.arg _use_stack_list \
+        --hidden \
+        --long=use-stack-list \
+        --value=JSON
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -254,6 +278,7 @@ rnchr_stack_get_id() {
 
     local _stack=
     local _stack_id_var=
+    local _use_stack_list=
 
     local should_exit=
     local should_exit_err=0
@@ -269,7 +294,8 @@ rnchr_stack_get_id() {
         __stack_id=$_stack
     else
         local _stack_json=
-        _rnchr_pass_env_args rnchr_stack_get --stack-var _stack_json "$_stack" || return
+        _rnchr_pass_env_args rnchr_stack_get "$_stack" \
+            --use-stack-list "$_use_stack_list" --stack-var _stack_json || return
 
         __stack_id=$(jq -Mr '.id' <<<"$_stack_json") || return
     fi
@@ -1535,7 +1561,7 @@ rnchr_stack_up() {
     if ! ((no_create)) && ((${#create_services[@]} + ${#recreate_services[@]})); then
         butl.log_info "Waiting for all services to become upgradable again..."
         for service in "${recreate_services[@]}" "${create_services[@]}"; do
-            _rnchr_pass_env_args rnchr_service_make_upgradable "$stack_id/$service" || return
+            _rnchr_pass_env_args rnchr_service_make_upgradable "$stack_id/$service" || continue
         done
     fi
 
