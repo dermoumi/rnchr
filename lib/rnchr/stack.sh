@@ -1486,9 +1486,12 @@ rnchr_stack_up() {
         local upgraded_service_ids=()
 
         for service in "${upgrade_services[@]}"; do
+            local service_json
+            service_json=$(jq -Mr --arg service "$service" \
+                '.[] | select(.name == $service)' <<<"$remote_services") || return
+
             local service_id
-            service_id=$(jq -Mr --arg service "$service" \
-                '.[] | select(.name == $service) | .id' <<<"$remote_services") || return
+            service_id=$(jq -Mr --arg service "$service" '.id' <<<"$service_json") || return
 
             if [[ ! "$service_id" ]]; then
                 butl.fail "Service $stack/$service does not exist"
@@ -1504,7 +1507,7 @@ rnchr_stack_up() {
             _rnchr_pass_env_args rnchr_service_make_upgradable "$stack_id/$service_id" --wait || return
 
             _rnchr_pass_env_args rnchr_service_upgrade "$stack_id/$service_id" \
-                --service-compose-json "$service_compose" --no-update-links || return
+                --service-compose-json "$service_compose" --use-service "$service_json" --no-update-links || return
         done
     fi
 

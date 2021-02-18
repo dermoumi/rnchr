@@ -1388,6 +1388,10 @@ rnchr_service_upgrade() {
         --hidden \
         --long=use-payload \
         --value=PAYLOAD
+    barg.arg _use_service \
+        --hidden \
+        --long=use-service \
+        --value=JSON
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -1410,6 +1414,7 @@ rnchr_service_upgrade() {
     local finish_upgrade_timeout=
     local ensure_secrets=
     local _use_payload=
+    local _use_service=
 
     local should_exit=
     local should_exit_err=0
@@ -1419,8 +1424,10 @@ rnchr_service_upgrade() {
         return "$should_exit_err"
     fi
 
-    local service_json
-    _rnchr_pass_env_args rnchr_service_get --service-var service_json "$stack_service" || return
+    local service_json=$_use_service
+    if [[ ! "$service_json" ]]; then
+        _rnchr_pass_env_args rnchr_service_get --service-var service_json "$stack_service" || return
+    fi
 
     local service_id
     service_id=$(jq -Mr '.id' <<<"$service_json") || return
@@ -1459,7 +1466,10 @@ rnchr_service_upgrade() {
         fi
 
         if [[ "$service_type" != "service" ]]; then
-            local args=(--service-compose-json "$service_compose_json")
+            local args=(
+                --service-compose-json "$service_compose_json"
+                --use-service "$service_json"
+            )
 
             if [[ "$service_type" == "dnsService" ]]; then
                 if ! ((no_update_links)); then
@@ -1596,6 +1606,10 @@ rnchr_service_upgrade_external_service() {
         --hidden \
         --long=use-payload \
         --value=PAYLOAD
+    barg.arg _use_service \
+        --hidden \
+        --long=use-service \
+        --value=JSON
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -1610,6 +1624,7 @@ rnchr_service_upgrade_external_service() {
     local service_compose_json=
     local stack_compose_json=()
     local _use_payload=
+    local _use_service=
 
     local should_exit=
     local should_exit_err=0
@@ -1619,8 +1634,10 @@ rnchr_service_upgrade_external_service() {
         return "$should_exit_err"
     fi
 
-    local service_json
-    _rnchr_pass_env_args rnchr_service_get --service-var service_json "$stack_service" || return
+    local service_json=$_use_service
+    if [[ ! "$service_json" ]]; then
+        _rnchr_pass_env_args rnchr_service_get --service-var service_json "$stack_service" || return
+    fi
 
     local service_id
     service_id=$(jq -Mr '.id' <<<"$service_json") || return
@@ -1718,6 +1735,10 @@ rnchr_service_upgrade_load_balancer() {
         --hidden \
         --long=use-payload \
         --value=PAYLOAD
+    barg.arg _use_service \
+        --hidden \
+        --long=use-service \
+        --value=JSON
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -1739,6 +1760,7 @@ rnchr_service_upgrade_load_balancer() {
     local finish_upgrade=
     local finish_upgrade_timeout=
     local _use_payload=
+    local _use_service=
 
     local should_exit=
     local should_exit_err=0
@@ -1748,8 +1770,10 @@ rnchr_service_upgrade_load_balancer() {
         return "$should_exit_err"
     fi
 
-    local service_json
-    _rnchr_pass_env_args rnchr_service_get --service-var service_json "$stack_service" || return
+    local service_json=$_use_service
+    if [[ ! "$_use_service" ]]; then
+        _rnchr_pass_env_args rnchr_service_get --service-var service_json "$stack_service" || return
+    fi
 
     local service_id
     service_id=$(jq -Mr '.id' <<<"$service_json") || return
@@ -1836,31 +1860,45 @@ rnchr_service_upgrade_load_balancer() {
 
     local launch_config=
     launch_config=$(jq -Mc '.launchConfig' <<<"$response") || return
-    upgrade_payload=$(
-        jq -Mnc \
-            --argjson startFirst "$start_first" \
-            --argjson batchSize "$batch_size" \
-            --argjson interval "$interval_millis" \
-            --argjson launchConfig "$launch_config" \
-            '{
-                "inServiceStrategy": {
-                    "batchSize": $batchSize,
-                    "intervalMillis": $interval,
-                    "startFirst": $startFirst,
-                    "launchConfig": $launchConfig,
-                }
-            }'
+
+    local same_labels=
+    same_labels=$(
+        jq -Mr --argjson remote "$launch_config" '.launchConfig.labels == $remote.labels' <<<"$service_json"
     ) || return
 
-    butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
-        "/loadbalancerservices/$service_id/?action=upgrade" -X POST -d "$upgrade_payload" || return
+    if [[ "$same_labels" == "true" ]]; then
+        local upgrade=0
+    else
+        local upgrade=1
+    fi
+
+    if ((upgrade)); then
+        upgrade_payload=$(
+            jq -Mnc \
+                --argjson startFirst "$start_first" \
+                --argjson batchSize "$batch_size" \
+                --argjson interval "$interval_millis" \
+                --argjson launchConfig "$launch_config" \
+                '{
+                    "inServiceStrategy": {
+                        "batchSize": $batchSize,
+                        "intervalMillis": $interval,
+                        "startFirst": $startFirst,
+                        "launchConfig": $launchConfig,
+                    }
+                }'
+        ) || return
+
+        butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
+            "/loadbalancerservices/$service_id/?action=upgrade" -X POST -d "$upgrade_payload" || return
+    fi
 
     if ! ((no_update_links)); then
         _rnchr_pass_env_args rnchr_service_update_links "$stack_service" \
             --service-compose-json "$service_compose_json" --use-service "$service_json" || return
     fi
 
-    if ((finish_upgrade)); then
+    if ((upgrade && finish_upgrade)); then
         _rnchr_pass_env_args rnchr_service_finish_upgrade "$service_id" --timeout="$finish_upgrade_timeout" || return
     fi
 }
