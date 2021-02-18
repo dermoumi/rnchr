@@ -1404,45 +1404,40 @@ rnchr_stack_up() {
                     _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
                         "$compose_json" "$service" --compose-var service_compose || return
 
-                    local remote_service_image
-                    remote_service_image=$(jq -Mr '.image' <<<"$remote_service_compose") || return
+                    local remote_is_builtin_service=0
+                    local remote_image=
+                    local remote_cmp_compose=
+                    remote_cmp_compose=$(
+                        rnchr_service_util_normalize_compose_json \
+                            remote_is_builtin_service \
+                            remote_image \
+                            <<<"$remote_service_compose"
+                    ) || return
 
-                    local service_image
-                    service_image=$(jq -Mr '.image' <<<"$service_compose") || return
+                    local is_builtin_service=0
+                    local service_image=
+                    local service_cmp_compose=
+                    service_cmp_compose=$(
+                        rnchr_service_util_normalize_compose_json \
+                            is_builtin_service \
+                            service_image \
+                            <<<"$service_compose"
+                    ) || return
 
-                    local remote_service_is_rancher_image=0
-                    if [[ "$remote_service_image" =~ ^rancher/(dns-service|external-service|lb-service-) ]]; then
-                        remote_service_is_rancher_image=1
-
-                        if [[ "$service_image" =~ ^rancher/(dns-service|external-service)$ ]]; then
-                            remote_service_compose=$(jq -Mrc 'del(.labels) | del(.tty) | del(.stdin)' \
-                                <<<"$remote_service_compose")
-                        fi
-                    fi
-
-                    local service_is_rancher_image=0
-                    if [[ "$service_image" =~ ^rancher/(dns-service|external-service|lb-service-) ]]; then
-                        service_is_rancher_image=1
-
-                        if [[ "$service_image" =~ ^rancher/(dns-service|external-service)$ ]]; then
-                            service_compose=$(jq -Mrc 'del(.labels) | del(.tty) | del(.stdin)' \
-                                <<<"$service_compose")
-                        fi
-                    fi
-
-                    if [[ "$remote_service_image" != "$service_image" ]] \
-                        && ((remote_service_is_rancher_image || service_is_rancher_image)); then
+                    if [[ "$remote_image" != "$service_image" ]] \
+                        && ((remote_is_builtin_service || is_builtin_service)); then
                         recreate_services+=("$service")
                     elif ((force_upgrade)); then
                         upgrade_services+=("$service")
-                    elif ! cmp <(rnchr_service_util_normalize_compose_json -c <<<"$remote_service_compose") \
-                        <(rnchr_service_util_normalize_compose_json -c <<<"$service_compose") >/dev/null; then
+                    elif ! cmp <(echo "$remote_cmp_compose") <(echo "$service_cmp_compose") >/dev/null; then
                         upgrade_services+=("$service")
 
-                        butl.log_debug "Adding $service to upgrade queue:"
-                        butl.log_debug "$(diff \
-                            <(rnchr_service_util_normalize_compose_json <<<"$remote_service_compose") \
-                            <(rnchr_service_util_normalize_compose_json <<<"$service_compose"))" || true
+                        if ((${LOG_LEVEL:-5} >= 7)); then
+                            butl.log_debug "Adding $service to upgrade queue:"
+                            butl.log_debug "$(
+                                diff <(echo "$remote_cmp_compose") <(echo "$service_cmp_compose")
+                            )" || true
+                        fi
                     fi
                 fi
             fi

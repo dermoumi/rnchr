@@ -1459,16 +1459,16 @@ rnchr_service_upgrade() {
         fi
 
         if [[ "$service_type" != "service" ]]; then
+            local args=(--service-compose-json "$service_compose_json")
+
             if [[ "$service_type" == "dnsService" ]]; then
                 if ! ((no_update_links)); then
                     _rnchr_pass_env_args rnchr_service_update_links "$stack_service" \
                         --service-compose-json "$service_compose_json" || return
                 fi
             elif [[ "$service_type" == "externalService" ]]; then
-                butl.log_warning "Updating external services is not implented yet"
+                _rnchr_pass_env_args rnchr_service_upgrade_external_service "$service_id" "${args[@]}" || return
             elif [[ "$service_type" == "loadBalancerService" ]]; then
-                local args=(--service-compose-json "$service_compose_json")
-
                 if ((no_start_first)); then
                     args+=(--no-start-first)
                 elif ((force_start_first)); then
@@ -1477,10 +1477,6 @@ rnchr_service_upgrade() {
 
                 if ((finish_upgrade)); then
                     args+=(--finish-upgrade)
-                fi
-
-                if ((ensure_secrets)); then
-                    args+=(--ensure-secrets)
                 fi
 
                 if [[ "$batch_size_override" ]]; then
@@ -1581,6 +1577,103 @@ rnchr_service_upgrade() {
     fi
 }
 
+rnchr_service_upgrade_external_service() {
+    _rnchr_env_args
+    barg.arg stack_service \
+        --required \
+        --value=STACK/NAME \
+        --desc="Service and stack names"
+    barg.arg service_compose_json \
+        --long=service-compose-json \
+        --value=SERVICE_COMPOSE \
+        --desc="Service compose JSON"
+    barg.arg stack_compose_json \
+        --long=stack-compose-json \
+        --value=STACK_COMPOSE \
+        --value=SERVICE \
+        --desc="Service from stack compose JSON"
+    barg.arg _use_payload \
+        --hidden \
+        --long=use-payload \
+        --value=PAYLOAD
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local stack_service=
+    local service_compose_json=
+    local stack_compose_json=()
+    local _use_payload=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local service_json
+    _rnchr_pass_env_args rnchr_service_get --service-var service_json "$stack_service" || return
+
+    local service_id
+    service_id=$(jq -Mr '.id' <<<"$service_json") || return
+
+    local stack_id
+    stack_id=$(jq -Mr '.stackId' <<<"$service_json") || return
+
+    local update_payload=
+    if [[ "$_use_payload" ]]; then
+        update_payload=$_use_payload
+    else
+        if [[ ! "$service_compose_json" ]] && ((${#stack_compose_json[@]} > 0)); then
+            local stack_compose=
+            stack_compose=${stack_compose_json[0]}
+
+            local target_service=
+            target_service=${stack_compose_json[1]}
+
+            _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
+                "$stack_compose" "$target_service" --compose-var service_compose_json || return
+        fi
+
+        if [[ ! "$service_compose_json" ]]; then
+            return
+        fi
+
+        local health_check
+        rnchr_service_util_to_healthcheck_config "$service_compose_json" --config-var health_check || return
+
+        local external_ips
+        external_ips=$(jq -Mc '.external_ips' <<<"$service_compose_json") || return
+
+        local hostname
+        hostname=$(jq -Mc '.hostname' <<<"$service_compose_json") || return
+
+        update_payload=$(
+            jq -Mnc \
+                --argjson healthCheck "$health_check" \
+                --argjson externalIpAddresses "$external_ips" \
+                --argjson hostname "$hostname" \
+                '{
+                    "healthCheck": $healthCheck,
+                    "externalIpAddresses": $externalIpAddresses,
+                    "hostname": $hostname
+                }'
+        ) || return
+    fi
+
+    local response
+    _rnchr_pass_env_args rnchr_env_api --response-var response \
+        "/externalservice/$service_id" -X PUT -d "$update_payload" || return
+}
+
 rnchr_service_upgrade_load_balancer() {
     _rnchr_env_args
     barg.arg stack_service \
@@ -1621,10 +1714,6 @@ rnchr_service_upgrade_load_balancer() {
         --long=finish-upgrade-timeout \
         --value=SECONDS \
         --desc="Finishes upgrade but fails if exceeds given time"
-    barg.arg ensure_secrets \
-        --implies=finish_upgrade \
-        --long=ensure-secrets \
-        --desc="Makes sure secrets are mounted after deploying"
     barg.arg _use_payload \
         --hidden \
         --long=use-payload \
@@ -1649,7 +1738,6 @@ rnchr_service_upgrade_load_balancer() {
     local no_update_links=
     local finish_upgrade=
     local finish_upgrade_timeout=
-    local ensure_secrets=
     local _use_payload=
 
     local should_exit=
@@ -1669,14 +1757,11 @@ rnchr_service_upgrade_load_balancer() {
     local stack_id
     stack_id=$(jq -Mr '.stackId' <<<"$service_json") || return
 
-    local update_payload=
-
     local batch_size=1
     local interval_millis=2000
     local start_first=false
 
-    local launch_config=
-    local lb_config=
+    local update_payload=
     if [[ "$_use_payload" ]]; then
         update_payload=$_use_payload
     else
@@ -1691,6 +1776,8 @@ rnchr_service_upgrade_load_balancer() {
                 "$stack_compose" "$target_service" --compose-var service_compose_json || return
         fi
 
+        local lb_config=
+        local launch_config=
         if [[ "$service_compose_json" ]]; then
             _rnchr_pass_env_args rnchr_service_util_to_launch_config "$service_compose_json" \
                 --config-var launch_config || return
@@ -1743,10 +1830,11 @@ rnchr_service_upgrade_load_balancer() {
         ) || return
     fi
 
-    local response
+    local response=
     _rnchr_pass_env_args rnchr_env_api --response-var response \
         "/loadbalancerservices/$service_id" -X PUT -d "$update_payload" || return
 
+    local launch_config=
     launch_config=$(jq -Mc '.launchConfig' <<<"$response") || return
     upgrade_payload=$(
         jq -Mnc \
@@ -1774,11 +1862,6 @@ rnchr_service_upgrade_load_balancer() {
 
     if ((finish_upgrade)); then
         _rnchr_pass_env_args rnchr_service_finish_upgrade "$service_id" --timeout="$finish_upgrade_timeout" || return
-
-        if ((ensure_secrets)); then
-            _rnchr_pass_env_args rnchr_service_ensure_secrets_mounted "$service_id" \
-                --use-payload "$update_payload" || return
-        fi
     fi
 }
 
@@ -2864,6 +2947,12 @@ rnchr_service_util_extract_service_compose() {
 }
 
 rnchr_service_util_normalize_compose_json() {
+    # This variable if not '', is set to 1 if the image is a rancher internal image
+    local __rnchr_is_builtin=$1
+    # This variable if not '', is set to the image of the service
+    local __rnchr_image_var=$2
+    shift 2
+
     local json
     json=$(jq -MS "$@" '
         .secrets = ((.secrets // []) | sort_by(.target))
@@ -2872,6 +2961,22 @@ rnchr_service_util_normalize_compose_json() {
         | del(.links)
         | del(.external_links)
     ') || return
+
+    local __service_image
+    __service_image=$(jq -Mr '.image' <<<"$json") || return
+    if [[ "$__rnchr_image_var" ]]; then
+        butl.set_var "$__rnchr_image_var" "$__service_image"
+    fi
+
+    if [[ "$__service_image" =~ ^rancher/(dns-service|external-service|lb-service-) ]]; then
+        if [[ "$__rnchr_is_builtin" ]]; then
+            butl.set_var "$__rnchr_is_builtin" 1
+        fi
+
+        if [[ "$__service_image" =~ ^rancher/(dns-service|external-service)$ ]]; then
+            json=$(jq -Mrc 'del(.labels) | del(.tty) | del(.stdin)' <<<"$json")
+        fi
+    fi
 
     local external_ips
     external_ips=$(jq -Mr '.external_ips | select(. != null)' <<<"$json") || return
