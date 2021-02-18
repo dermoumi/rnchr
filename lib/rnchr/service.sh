@@ -833,7 +833,7 @@ rnchr_service_create() {
         if [[ "$__service_type" == "dnsService" ]]; then
             _rnchr_pass_env_args rnchr_service_create_dns_service "$__stack_service" "${__args[@]}"
         elif [[ "$__service_type" == "externalService" ]]; then
-            butl.log_warning "Creating external services is not implented yet"
+            _rnchr_pass_env_args rnchr_service_create_external_service "$__stack_service" "${__args[@]}"
         elif [[ "$__service_type" == "loadBalancerService" ]]; then
             _rnchr_pass_env_args rnchr_service_create_load_balancer "$__stack_service" "${__args[@]}"
         fi
@@ -1143,22 +1143,37 @@ rnchr_service_create_external_service() {
         start_on_create=false
     fi
 
+    local health_check
+    rnchr_service_util_to_healthcheck_config "$__service_compose_json" --config-var health_check || return
+
+    local external_ips
+    external_ips=$(jq -Mc '.external_ips' <<<"$__service_compose_json") || return
+
+    local hostname
+    hostname=$(jq -Mc '.hostname' <<<"$__service_compose_json") || return
+
     local __payload
     __payload=$(
         jq -Mnc \
             --arg name "$_service" \
             --argjson startOnCreate "$start_on_create" \
             --arg stackId "$_stack_id" \
+            --argjson healthCheck "$health_check" \
+            --argjson externalIpAddresses "$external_ips" \
+            --argjson hostname "$hostname" \
             '{
-                "type": "dnsService",
+                "type": "externalService",
                 "name": $name,
                 "stackId": $stackId,
                 "startOnCreate": $startOnCreate,
                 "assignServiceIpAddress": false,
+                "healthCheck": $healthCheck,
+                "externalIpAddresses": $externalIpAddresses,
+                "hostname": $hostname
             }'
     ) || return
 
-    butl.muffle_all _rnchr_pass_env_args rnchr_env_api "/dnsservice" -X POST -d "$__payload" || return
+    butl.muffle_all _rnchr_pass_env_args rnchr_env_api "/externalservice" -X POST -d "$__payload" || return
 
     if ! ((__no_update_links)); then
         _rnchr_pass_env_args rnchr_service_update_links "$__service_id" \
@@ -1736,7 +1751,9 @@ rnchr_service_upgrade_load_balancer() {
     _rnchr_pass_env_args rnchr_env_api --response-var response \
         "/loadbalancerservices/$service_id" -X PUT -d "$update_payload" || return
 
-    launch_config=$(jq -Mc '.launchConfig' <<<"$response")
+    echo "$response" | jq . >&2
+
+    launch_config=$(jq -Mc '.launchConfig' <<<"$response") || return
     upgrade_payload=$(
         jq -Mnc \
             --argjson startFirst "$start_first" \
@@ -1752,6 +1769,7 @@ rnchr_service_upgrade_load_balancer() {
                 }
             }'
     ) || return
+
     butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
         "/loadbalancerservices/$service_id/?action=upgrade" -X POST -d "$upgrade_payload" || return
 
@@ -1958,6 +1976,12 @@ rnchr_service_update_links() {
         fi
 
         service_id=$(jq -Mr '.id' <<<"$service_json") || return
+    fi
+
+    local has_action
+    has_action=$(jq -Mr '.actions.setservicelinks | select(. != null)' <<<"$service_json") || return
+    if [[ ! "$has_action" ]]; then
+        return
     fi
 
     if [[ ! "$service_compose_json" ]] && ((${#stack_compose_json[@]} > 0)); then
@@ -2846,11 +2870,20 @@ rnchr_service_util_extract_service_compose() {
 }
 
 rnchr_service_util_normalize_compose_json() {
-    jq -MS "$@" '
+    local json
+    json=$(jq -MS "$@" '
         .secrets = ((.secrets // []) | sort_by(.target))
         | .ports = ((.ports // []) | sort)
         | .expose = ((.expose // []) | sort)
         | del(.links)
         | del(.external_links)
-    '
+    ') || return
+
+    local external_ips
+    external_ips=$(jq -Mr '.external_ips | select(. != null)' <<<"$json") || return
+    if [[ "$external_ips" ]]; then
+        json=$(jq -MS "$@" '.external_ips |= sort' <<<"$json") || return
+    fi
+
+    echo "$json"
 }
