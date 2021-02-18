@@ -1447,9 +1447,9 @@ rnchr_service_upgrade() {
 
             if [[ "$service_image" == "rancher/dns-service" ]]; then
                 service_type="dnsService"
-            elif [[ "$service_image" == "rancher/" ]]; then
+            elif [[ "$service_image" == "rancher/external-service" ]]; then
                 service_type="externalService"
-            elif [[ "$service_image" =~ ^$ ]]; then
+            elif [[ "$service_image" =~ ^rancher/lb-service- ]]; then
                 service_type="loadBalancerService"
             else
                 service_type="service"
@@ -1467,43 +1467,39 @@ rnchr_service_upgrade() {
             elif [[ "$service_type" == "externalService" ]]; then
                 butl.log_warning "Updating external services is not implented yet"
             elif [[ "$service_type" == "loadBalancerService" ]]; then
-                local __args=()
+                local args=(--service-compose-json "$service_compose_json")
 
                 if ((no_start_first)); then
-                    __args+=(--no-start-first)
+                    args+=(--no-start-first)
                 elif ((force_start_first)); then
-                    __args+=(--force-start-first)
+                    args+=(--force-start-first)
                 fi
 
                 if ((finish_upgrade)); then
-                    __args+=(--finish-upgrade)
+                    args+=(--finish-upgrade)
                 fi
 
                 if ((ensure_secrets)); then
-                    __args+=(--ensure-secrets)
+                    args+=(--ensure-secrets)
                 fi
 
                 if [[ "$batch_size_override" ]]; then
-                    __args+=(--batch-size "$batch_size_override")
+                    args+=(--batch-size "$batch_size_override")
                 fi
 
                 if [[ "$interval_override" ]]; then
-                    __args+=(--interval "$interval_override")
+                    args+=(--interval "$interval_override")
                 fi
 
                 if [[ "$finish_upgrade_timeout" ]]; then
-                    __args+=(--finish-upgrade-timeout "$finish_upgrade_timeout")
+                    args+=(--finish-upgrade-timeout "$finish_upgrade_timeout")
                 fi
 
                 if [[ "$_use_payload" ]]; then
-                    __args+=(--use-payload "$_use_payload")
+                    args+=(--use-payload "$_use_payload")
                 fi
 
-                if ((${#__args[@]})); then
-                    _rnchr_pass_env_args rnchr_service_upgrade_load_balancer "$service_id" "${__args[@]}" || return
-                else
-                    _rnchr_pass_env_args rnchr_service_upgrade_load_balancer "$service_id" || return
-                fi
+                _rnchr_pass_env_args rnchr_service_upgrade_load_balancer "$service_id" "${args[@]}" || return
             fi
 
             return
@@ -1750,8 +1746,6 @@ rnchr_service_upgrade_load_balancer() {
     local response
     _rnchr_pass_env_args rnchr_env_api --response-var response \
         "/loadbalancerservices/$service_id" -X PUT -d "$update_payload" || return
-
-    echo "$response" | jq . >&2
 
     launch_config=$(jq -Mc '.launchConfig' <<<"$response") || return
     upgrade_payload=$(
