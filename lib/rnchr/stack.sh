@@ -1530,9 +1530,18 @@ rnchr_stack_up() {
         local services_list=${json_map[1]}
 
         for service in "${recreate_services[@]}" "${create_services[@]}" "${upgrade_services[@]}"; do
+            if [[ ! "$service" ]]; then
+                continue
+            fi
+
             local service_id
             service_id=$(jq -Mr --arg service "$service" \
                 '.[] | select(.name == $service) | .id' <<<"$remote_services") || return
+
+            if [[ ! "$service_id" ]]; then
+                butl.log_warning "Service $stack/$service was not deployed correctly"
+                continue
+            fi
 
             local service_compose
             service_compose=$(jq -Mc --arg service "$service" \

@@ -794,37 +794,18 @@ rnchr_service_create() {
     local __service_image
     __service_image=$(jq -Mr '.image' <<<"$__service_compose_json") || return
 
+    local __service_type
     if [[ "$__service_image" == "rancher/dns-service" ]]; then
-        local __args=(--service-compose-json "$__service_compose_json")
-
-        if ((__force_start_on_create)); then
-            __args+=(--force-start-on-create)
-        elif ((__no_start_on_create)); then
-            __args+=(--no-start-on-create)
-        fi
-
-        if ((__no_update_links)); then
-            __args+=(--no-update-links)
-        fi
-
-        if [[ "$__id_var" ]]; then
-            __args+=(--id-var "$__id_var")
-        fi
-
-        if [[ "$__service_var" ]]; then
-            __args+=(--service-var "$__service_var")
-        fi
-
-        if [[ "$__silent" ]]; then
-            __args+=(--silent)
-        fi
-
-        _rnchr_pass_env_args rnchr_service_create_dns_service "$__stack_service" "${__args[@]}"
-        return
+        __service_type="dnsService"
     elif [[ "$__service_image" == "rancher/external-service" ]]; then
-        butl.log_warning "Creating external services is not implented yet"
-        return
+        __service_type="externalService"
     elif [[ "$__service_image" =~ ^rancher/lb-service- ]]; then
+        __service_type="loadBalancerService"
+    else
+        __service_type="service"
+    fi
+
+    if [[ "$__service_type" != "service" ]]; then
         local __args=(--service-compose-json "$__service_compose_json")
 
         if ((__force_start_on_create)); then
@@ -849,7 +830,14 @@ rnchr_service_create() {
             __args+=(--silent)
         fi
 
-        _rnchr_pass_env_args rnchr_service_create_load_balancer "$__stack_service" "${__args[@]}"
+        if [[ "$__service_type" == "dnsService" ]]; then
+            _rnchr_pass_env_args rnchr_service_create_dns_service "$__stack_service" "${__args[@]}"
+        elif [[ "$__service_type" == "externalService" ]]; then
+            butl.log_warning "Creating external services is not implented yet"
+        elif [[ "$__service_type" == "loadBalancerService" ]]; then
+            _rnchr_pass_env_args rnchr_service_create_load_balancer "$__stack_service" "${__args[@]}"
+        fi
+
         return
     fi
 
@@ -1295,12 +1283,6 @@ rnchr_service_upgrade() {
     if [[ "$_use_payload" ]]; then
         payload=$_use_payload
     else
-        local batch_size=1
-        local interval_millis=2000
-        local start_first=false
-
-        local launch_config=
-
         if [[ ! "$service_compose_json" ]] && ((${#stack_compose_json[@]} > 0)); then
             local stack_compose=
             stack_compose=${stack_compose_json[0]}
@@ -1312,80 +1294,33 @@ rnchr_service_upgrade() {
                 "$stack_compose" "$target_service" --compose-var service_compose_json || return
         fi
 
+        local service_type
         if [[ "$service_compose_json" ]]; then
             local service_image
             service_image=$(jq -Mr '.image' <<<"$service_compose_json") || return
 
             if [[ "$service_image" == "rancher/dns-service" ]]; then
-                if ! ((no_update_links)); then
-                    _rnchr_pass_env_args rnchr_service_update_links "$stack_service" \
-                        --service-compose-json "$service_compose_json" || return
-                fi
-
-                return
-            elif [[ "$service_image" == "rancher/external-service" ]]; then
-                butl.log_warning "Updating external services is not implented yet"
-                return
-            elif [[ "$service_image" =~ ^rancher/lb-service- ]]; then
-                local __args=(--service-compose-json "$service_compose_json")
-
-                if ((no_start_first)); then
-                    __args+=(--no-start-first)
-                elif ((force_start_first)); then
-                    __args+=(--force-start-first)
-                fi
-
-                if ((finish_upgrade)); then
-                    __args+=(--finish-upgrade)
-                fi
-
-                if ((ensure_secrets)); then
-                    __args+=(--ensure-secrets)
-                fi
-
-                if [[ "$batch_size_override" ]]; then
-                    __args+=(--batch-size "$batch_size_override")
-                fi
-
-                if [[ "$interval_override" ]]; then
-                    __args+=(--interval "$interval_override")
-                fi
-
-                if [[ "$finish_upgrade_timeout" ]]; then
-                    __args+=(--finish-upgrade-timeout "$finish_upgrade_timeout")
-                fi
-
-                if [[ "$_use_payload" ]]; then
-                    __args+=(--use-payload "$_use_payload")
-                fi
-
-                _rnchr_pass_env_args rnchr_service_upgrade_load_balancer "$stack_service" "${__args[@]}"
-                return
+                service_type="dnsService"
+            elif [[ "$service_image" == "rancher/" ]]; then
+                service_type="externalService"
+            elif [[ "$service_image" =~ ^$ ]]; then
+                service_type="loadBalancerService"
+            else
+                service_type="service"
             fi
-
-            _rnchr_pass_env_args rnchr_service_util_to_launch_config "$service_compose_json" \
-                --config-var launch_config || return
-
-            batch_size=$(jq -Mr '.upgrade_strategy.batch_size // 1' <<<"$service_compose_json") || return
-            interval_millis=$(jq -Mr '.upgrade_strategy.interval_millis // 2000' <<<"$service_compose_json") || return
-            start_first=$(jq -Mr '.upgrade_strategy.start_first // false' <<<"$service_compose_json") || return
         else
-            launch_config=$(jq -Mc '.upgrade.inServiceStrategy.launchConfig' <<<"$service_json") || return
+            service_type=$(jq -Mr '.type' <<<"$service_json") || return
+        fi
 
-            local service_image=
-            service_image=$(jq -Mr '.imageUuid' <<<"$launch_config") || return
-
-            if [[ "$service_image" == "rancher/dns-service" ]]; then
+        if [[ "$service_type" != "service" ]]; then
+            if [[ "$service_type" == "dnsService" ]]; then
                 if ! ((no_update_links)); then
                     _rnchr_pass_env_args rnchr_service_update_links "$stack_service" \
                         --service-compose-json "$service_compose_json" || return
                 fi
-
-                return
-            elif [[ "$service_image" == "rancher/external-service" ]]; then
+            elif [[ "$service_type" == "externalService" ]]; then
                 butl.log_warning "Updating external services is not implented yet"
-                return
-            elif [[ "$service_image" =~ ^rancher/lb-service- ]]; then
+            elif [[ "$service_type" == "loadBalancerService" ]]; then
                 local __args=()
 
                 if ((no_start_first)); then
@@ -1419,16 +1354,41 @@ rnchr_service_upgrade() {
                 fi
 
                 if ((${#__args[@]})); then
-                    _rnchr_pass_env_args rnchr_service_upgrade_load_balancer "$stack_service" "${__args[@]}" || return
+                    _rnchr_pass_env_args rnchr_service_upgrade_load_balancer "$service_id" "${__args[@]}" || return
                 else
-                    _rnchr_pass_env_args rnchr_service_upgrade_load_balancer "$stack_service" || return
+                    _rnchr_pass_env_args rnchr_service_upgrade_load_balancer "$service_id" || return
                 fi
-                return
             fi
 
-            batch_size=$(jq -Mc '.upgrade.inServiceStrategy.batchSize' <<<"$service_json") || return
-            interval_millis=$(jq -Mc '.upgrade.inServiceStrategy.intervalMillis' <<<"$service_json") || return
-            start_first=$(jq -Mc '.upgrade.inServiceStrategy.startFirst' <<<"$service_json") || return
+            return
+        fi
+
+        local batch_size=1
+        local interval_millis=2000
+        local start_first=false
+
+        local launch_config=
+
+        if [[ "$service_compose_json" ]]; then
+            _rnchr_pass_env_args rnchr_service_util_to_launch_config "$service_compose_json" \
+                --config-var launch_config || return
+
+            batch_size=$(jq -Mr '.upgrade_strategy.batch_size // 1' <<<"$service_compose_json") || return
+            interval_millis=$(jq -Mr '.upgrade_strategy.interval_millis // 2000' <<<"$service_compose_json") || return
+            start_first=$(jq -Mr '.upgrade_strategy.start_first // false' <<<"$service_compose_json") || return
+        else
+            local upgrade_json
+            upgrade_json=$(jq -Mc '.upgrade | select(. != null)' <<<"$service_json") || return
+
+            if [[ "$upgrade_json" ]]; then
+                launch_config=$(jq -Mc '.inServiceStrategy.launchConfig' <<<"$upgrade_json") || return
+
+                batch_size=$(jq -Mc '.inServiceStrategy.batchSize' <<<"$upgrade_json") || return
+                interval_millis=$(jq -Mc '.inServiceStrategy.intervalMillis' <<<"$upgrade_json") || return
+                start_first=$(jq -Mc '.inServiceStrategy.startFirst' <<<"$upgrade_json") || return
+            else
+                launch_config=$(jq -Mc '.launchConfig' <<<"$service_json") || return
+            fi
         fi
 
         if [[ "$batch_size_override" ]]; then
@@ -1567,19 +1527,17 @@ rnchr_service_upgrade_load_balancer() {
     local stack_id
     stack_id=$(jq -Mr '.stackId' <<<"$service_json") || return
 
-    local update_payload
-    local upgrade_payload
+    local update_payload=
+
+    local batch_size=1
+    local interval_millis=2000
+    local start_first=false
+
+    local launch_config=
+    local lb_config=
     if [[ "$_use_payload" ]]; then
-        update_payload=$(jq -Mc '.updatePayload' <<<"$_use_payload") || return
-        upgrade_payload=$(jq -Mc '.upgradePayload' <<<"$_use_payload") || return
+        update_payload=$_use_payload
     else
-        local batch_size=1
-        local interval_millis=2000
-        local start_first=false
-
-        local launch_config=
-        local lb_config=
-
         if [[ ! "$service_compose_json" ]] && ((${#stack_compose_json[@]} > 0)); then
             local stack_compose=
             stack_compose=${stack_compose_json[0]}
@@ -1602,12 +1560,20 @@ rnchr_service_upgrade_load_balancer() {
             interval_millis=$(jq -Mr '.upgrade_strategy.interval_millis // 2000' <<<"$service_compose_json") || return
             start_first=$(jq -Mr '.upgrade_strategy.start_first // false' <<<"$service_compose_json") || return
         else
-            launch_config=$(jq -Mc '.upgrade.inServiceStrategy.launchConfig' <<<"$service_json") || return
-            lb_config=$(jq -Mc '.upgrade.inServiceStrategy.lbConfig' <<<"$service_json") || return
+            local upgrade_json
+            upgrade_json=$(jq -Mc '.upgrade | select(. != null)' <<<"$service_json") || return
 
-            batch_size=$(jq -Mc '.upgrade.inServiceStrategy.batchSize' <<<"$service_json") || return
-            interval_millis=$(jq -Mc '.upgrade.inServiceStrategy.intervalMillis' <<<"$service_json") || return
-            start_first=$(jq -Mc '.upgrade.inServiceStrategy.startFirst' <<<"$service_json") || return
+            if [[ "$upgrade_json" ]]; then
+                launch_config=$(jq -Mc '.inServiceStrategy.launchConfig' <<<"$upgrade_json") || return
+
+                batch_size=$(jq -Mc '.inServiceStrategy.batchSize' <<<"$upgrade_json") || return
+                interval_millis=$(jq -Mc '.inServiceStrategy.intervalMillis' <<<"$upgrade_json") || return
+                start_first=$(jq -Mc '.inServiceStrategy.startFirst' <<<"$upgrade_json") || return
+            else
+                launch_config=$(jq -Mc '.launchConfig' <<<"$service_json") || return
+            fi
+
+            lb_config=$(jq -Mc '.lbConfig' <<<"$service_json") || return
         fi
 
         if [[ "$batch_size_override" ]]; then
@@ -1629,54 +1595,46 @@ rnchr_service_upgrade_load_balancer() {
                 --argjson lbConfig "$lb_config" \
                 --argjson launchConfig "$launch_config" \
                 '{
-                   "lbConfig": $lbConfig,
-                   "launchConfig": $launchConfig,
-               }'
-        )
-
-        upgrade_payload=$(
-            jq -Mnc \
-                --argjson startFirst "$start_first" \
-                --argjson batchSize "$batch_size" \
-                --argjson interval "$interval_millis" \
-                --argjson launchConfig "$launch_config" \
-                '{
-                    "inServiceStrategy": {
-                        "batchSize": $batchSize,
-                        "intervalMillis": $interval,
-                        "startFirst": $startFirst,
-                        "launchConfig": $launchConfig,
-                    }
+                    "lbConfig": $lbConfig,
+                    "launchConfig": $launchConfig,
                 }'
         ) || return
     fi
 
-    butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
+    local response
+    _rnchr_pass_env_args rnchr_env_api --response-var response \
         "/loadbalancerservices/$service_id" -X PUT -d "$update_payload" || return
 
+    launch_config=$(jq -Mc '.launchConfig' <<<"$response")
+    upgrade_payload=$(
+        jq -Mnc \
+            --argjson startFirst "$start_first" \
+            --argjson batchSize "$batch_size" \
+            --argjson interval "$interval_millis" \
+            --argjson launchConfig "$launch_config" \
+            '{
+                "inServiceStrategy": {
+                    "batchSize": $batchSize,
+                    "intervalMillis": $interval,
+                    "startFirst": $startFirst,
+                    "launchConfig": $launchConfig,
+                }
+            }'
+    ) || return
     butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
         "/loadbalancerservices/$service_id/?action=upgrade" -X POST -d "$upgrade_payload" || return
 
     if ! ((no_update_links)); then
         _rnchr_pass_env_args rnchr_service_update_links "$stack_service" \
-            --service-compose-json "$service_compose_json" || return
+            --service-compose-json "$service_compose_json" --use-service "$service_json" || return
     fi
 
     if ((finish_upgrade)); then
         _rnchr_pass_env_args rnchr_service_finish_upgrade "$service_id" --timeout="$finish_upgrade_timeout" || return
 
         if ((ensure_secrets)); then
-            local payload=
-            payload=$(
-                jq -Mnc \
-                    --argjson updatePayload "$update_payload" \
-                    --argjson upgradePayload "$upgrade_payload" \
-                    '{
-                    updatePayload: $updatePayload,
-                    upgradePayload: $upgradePayload
-                }'
-            )
-            _rnchr_pass_env_args rnchr_service_ensure_secrets_mounted "$service_id" --use-payload "$payload" || return
+            _rnchr_pass_env_args rnchr_service_ensure_secrets_mounted "$service_id" \
+                --use-payload "$update_payload" || return
         fi
     fi
 }
@@ -1744,6 +1702,10 @@ rnchr_service_update_links() {
         --value=STACK_COMPOSE \
         --value=SERVICE \
         --desc="Service from stack compose JSON"
+    barg.arg _use_service \
+        --hidden \
+        --long=use-service \
+        --value=JSON
     barg.arg _use_stack_list \
         --hidden \
         --long=use-stack-list \
@@ -1765,6 +1727,7 @@ rnchr_service_update_links() {
     local stack_service=
     local service_compose_json=
     local stack_compose_json=()
+    local _use_service=
     local _use_stack_list=
     local _use_service_list=
 
@@ -1776,6 +1739,96 @@ rnchr_service_update_links() {
         return "$should_exit_err"
     fi
 
+    # preload rancher env ID before running co_run
+    _rnchr_pass_args rnchr_env_get_id "$rancher_env" >/dev/null || return
+
+    local stacks_list=
+    local services_list=
+
+    if [[ "$_use_service_list" && "$_use_stack_list" ]]; then
+        stacks_list=$_use_stack_list
+        services_list=$_use_service_list
+    elif [[ "$_use_service_list" ]]; then
+        services_list=$_use_service_list
+        _rnchr_pass_env_args rnchr_stack_list --stacks-var stack_list || return
+    elif [[ "$_use_stack_list" ]]; then
+        stacks_list=$_use_stack_list
+        _rnchr_pass_env_args rnchr_service_list --services-var service_list || return
+    else
+        # Retrieve stacks and services lists
+        local json_map=()
+        butl.co_run json_map \
+            "_rnchr_pass_env_args rnchr_stack_list" \
+            "_rnchr_pass_env_args rnchr_service_list" || return
+
+        stacks_list=${json_map[0]}
+        services_list=${json_map[1]}
+    fi
+
+    # Retrieve stack and service info
+    local service_id=
+    local service_name=
+    local stack_id=
+    local stack_name=
+
+    # Retrieve stack data
+    if [[ "$stack_service" =~ \/ ]]; then
+        stack_name=${stack_service%%/*}
+        service_name=${stack_service#$stack_name\/}
+
+        if [[ "$stack_name" =~ ^1st[[:digit:]]+ ]]; then
+            stack_id=$stack_name
+            stack_name=$(jq -Mr --arg id "$stack_id" \
+                '.[] | select(.id == $id) | .name' <<<"$stacks_list") || return
+        else
+            stack_id=$(jq -Mr --arg name "$stack_name" \
+                '.[] | select(.name == $name) | .id' <<<"$stacks_list") || return
+        fi
+
+        if [[ ! "$stack_id" ]]; then
+            butl.fail "Stack $stack_name does not exist"
+            return
+        fi
+    fi
+
+    # Retrieve service data
+    local service_json=$_use_service
+    if [[ "$stack_service" =~ ^1s[[:digit:]]+ ]]; then
+        service_id=$stack_service
+
+        if [[ ! "$service_json" ]]; then
+            service_json=$(jq -Mc --arg id "$service_id" \
+                '.[] | select(.id == $id)' <<<"$services_list") || return
+
+            if [[ ! "$service_json" ]]; then
+                butl.fail "Service $service_id does not exist"
+                return
+            fi
+        fi
+
+        service_name=$(jq -Mr '.name' <<<"$service_json") || return
+        stack_id=$(jq -Mr '.stackId' <<<"$service_json") || return
+        stack_name=$(jq -Mr --arg id "$stack_id" \
+            '.[] | select(.id == $id) | .name' <<<"$stacks_list") || return
+    elif [[ "$service_name" ]]; then
+        if [[ ! "$stack_id" ]]; then
+            butl.fail "Stack name should be an ID or <STACK>/<SERVICE>"
+            return
+        fi
+
+        if [[ ! "$service_json" ]]; then
+            service_json=$(jq -Mc --arg name "$service_name" --arg stackId "$stack_id" \
+                '.[] | select((.name == $name) and (.stackId == $stackId))' <<<"$services_list") || return
+
+            if [[ ! "$service_json" ]]; then
+                butl.fail "Service $stack_name/$service_name does not exist"
+                return
+            fi
+        fi
+
+        service_id=$(jq -Mr '.id' <<<"$service_json") || return
+    fi
+
     if [[ ! "$service_compose_json" ]] && ((${#stack_compose_json[@]} > 0)); then
         local stack_compose=
         stack_compose=${stack_compose_json[0]}
@@ -1785,170 +1838,83 @@ rnchr_service_update_links() {
 
         _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
             "$stack_compose" "$target_service" --compose-var service_compose_json || return
-
-        if [[ ! "$service_compose_json" ]]; then
-            butl.fail "Compose file does not have any entry for service $target_service"
-            return
-        fi
     fi
 
-    if [[ ! "$service_compose_json" ]]; then
-        butl.fail "No service configuration was supplied"
-        return
-    fi
+    local payload='{"serviceLinks":[]}'
+    if [[ "$service_compose_json" ]]; then
+        # Extract links from service compose JSON
 
-    local links_str
-    links_str=$(jq -Mr "(.external_links // []) + (.links // []) | .[]" <<<"$service_compose_json")
+        local links_str
+        links_str=$(jq -Mr "(.external_links // []) + (.links // []) | .[]" <<<"$service_compose_json")
 
-    local links
-    butl.split_lines links "$links_str" || return
+        local links
+        butl.split_lines links "$links_str" || return
 
-    if ((${#links[@]})); then
-        # preload rancher env ID before running co_run
-        _rnchr_pass_args rnchr_env_get_id "$rancher_env" >/dev/null || return
+        if ((${#links[@]})); then
+            # Loop over links
+            local link
+            for link in "${links[@]}"; do
+                local alias=${link##*:}
+                local target_service=${link%:$alias}
 
-        local stacks_list=
-        local services_list=
+                # Get the target service ID
+                local target_service_id
+                if [[ "$target_service" =~ \/ ]]; then
+                    local stack=${target_service%%/*}
+                    local service=${target_service#$stack\/}
 
-        if [[ "$_use_service_list" && "$_use_stack_list" ]]; then
-            stacks_list=$_use_stack_list
-            services_list=$_use_service_list
-        elif [[ "$_use_service_list" ]]; then
-            services_list=$_use_service_list
-            _rnchr_pass_env_args rnchr_stack_list --stacks-var stack_list || return
-        elif [[ "$_use_stack_list" ]]; then
-            stacks_list=$_use_stack_list
-            _rnchr_pass_env_args rnchr_service_list --services-var service_list || return
-        else
-            # Retrieve stacks and services lists
-            local json_map=()
-            butl.co_run json_map \
-                "_rnchr_pass_env_args rnchr_stack_list" \
-                "_rnchr_pass_env_args rnchr_service_list" || return
+                    local target_stack_id
+                    target_stack_id=$(jq -Mr --arg name "$stack" \
+                        '.[] | select(.name == $name) | .id' <<<"$stacks_list") || return
 
-            stacks_list=${json_map[0]}
-            services_list=${json_map[1]}
-        fi
+                    local target_service_json
+                    target_service_json=$(jq -Mc --arg name "$service" --arg stackId "$target_stack_id" \
+                        '.[] | select((.name == $name) and (.stackId == $stackId))' <<<"$services_list") || return
 
-        # Retrieve stack and service info
-        local service_id=
-        local service_name=
-        local stack_id=
-        local stack_name=
+                    if [[ "$target_service_json" ]]; then
+                        target_service_id=$(jq -Mr '.id' <<<"$target_service_json") || return
+                    fi
+                else
+                    local target_service_json
+                    target_service_json=$(jq -Mc --arg name "$target_service" --arg stackId "$stack_id" \
+                        '.[] | select((.name == $name) and (.stackId == $stackId))' <<<"$services_list") || return
 
-        # Retrieve stack data
-        if [[ "$stack_service" =~ \/ ]]; then
-            stack_name=${stack_service%%/*}
-            service_name=${stack_service#$stack_name\/}
+                    if [[ "$target_service_json" ]]; then
+                        target_service_id=$(jq -Mr '.id' <<<"$target_service_json") || return
+                    fi
+                fi
 
-            if [[ "$stack_name" =~ ^1st[[:digit:]]+ ]]; then
-                stack_id=$stack_name
-                stack_name=$(jq -Mr --arg id "$stack_id" \
-                    '.[] | select(.id == $id) | .name' <<<"$stacks_list") || return
-            else
-                stack_id=$(jq -Mr --arg name "$stack_name" \
-                    '.[] | select(.name == $name) | .id' <<<"$stacks_list") || return
-            fi
-
-            if [[ ! "$stack_id" ]]; then
-                butl.fail "Stack $stack_name does not exist"
-                return
-            fi
-        fi
-
-        # Retrieve service data
-        local service_json
-        if [[ "$stack_service" =~ ^1s[[:digit:]]+ ]]; then
-            service_id=$stack_service
-
-            service_json=$(jq -Mc --arg id "$service_id" \
-                '.[] | select(.id == $id)' <<<"$services_list") || return
-
-            if [[ ! "$service_json" ]]; then
-                butl.fail "Service $service_id does not exist"
-                return
-            fi
-
-            service_name=$(jq -Mr '.name' <<<"$service_json") || return
-            stack_id=$(jq -Mr '.stackId' <<<"$service_json") || return
-            stack_name=$(jq -Mr --arg id "$stack_id" \
-                '.[] | select(.id == $id) | .name' <<<"$stacks_list") || return
-        elif [[ "$service_name" && "$stack_id" ]]; then
-            service_json=$(jq -Mc --arg name "$service_name" --arg stackId "$stack_id" \
-                '.[] | select((.name == $name) and (.stackId == $stackId))' <<<"$services_list") || return
-
-            if [[ ! "$service_json" ]]; then
-                butl.fail "Service $stack_name/$service_name does not exist"
-                return
-            fi
-
-            service_id=$(jq -Mr '.id' <<<"$service_json") || return
-        fi
-
-        # Generate payload
-        local payload='{"serviceLinks":[]}'
-
-        # Loop over links
-        local link
-        for link in "${links[@]}"; do
-            local alias=${link##*:}
-            local target_service=${link%:$alias}
-
-            # Get the target service ID
-            local target_service_id
-            local target_service_name
-            if [[ "$target_service" =~ \/ ]]; then
-                local stack=${target_service%%/*}
-                local service=${target_service#$stack\/}
-
-                local target_stack_id
-                target_stack_id=$(jq -Mr --arg name "$stack" \
-                    '.[] | select(.name == $name) | .id' <<<"$stacks_list") || return
-
-                local target_service_json
-                target_service_json=$(jq -Mc --arg name "$service" --arg stackId "$target_stack_id" \
-                    '.[] | select((.name == $name) and (.stackId == $stackId))' <<<"$services_list") || return
-
-                if [[ ! "$target_service_json" ]]; then
-                    butl.fail "Target service $target_service does not exist"
+                if [[ ! "$target_service_id" ]]; then
+                    butl.fail "Service $stack_service links to missing $target_service."
                     return
                 fi
 
-                target_service_id=$(jq -Mr '.id' <<<"$target_service_json") || return
-                target_service_name=$service
-            else
-                local target_service_json
-                target_service_json=$(jq -Mc --arg name "$target_service" --arg stackId "$stack_id" \
-                    '.[] | select((.name == $name) and (.stackId == $stackId))' <<<"$services_list") || return
-
-                if [[ ! "$target_service_json" ]]; then
-                    butl.fail "Target service $target_service does not exist"
-                    return
-                fi
-
-                target_service_id=$(jq -Mr '.id' <<<"$target_service_json") || return
-                target_service_name=$(jq -Mr '.name' <<<"$target_service_json") || return
-            fi
-
-            if [[ "$alias" == "$target_service_name" ]]; then
-                local destination=
-            else
-                local destination=$alias
-            fi
-
-            butl.log_debug "Linking $target_service ($target_service_id) -> $alias"
-            payload=$(
-                jq -Mc --arg alias "$destination" --arg serviceId "$target_service_id" \
-                    '.serviceLinks += [{
+                butl.log_debug "Linking $target_service ($target_service_id) -> $alias"
+                payload=$(
+                    jq -Mc --arg alias "$alias" --arg serviceId "$target_service_id" \
+                        '.serviceLinks += [{
                         "name": $alias,
                         "serviceId": $serviceId,
                     }]' <<<"$payload"
-            )
-        done
-
-        butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
-            "/services/$service_id/?action=setservicelinks" -X POST -d "$payload" || return
+                )
+            done
+        fi
+    else
+        # Extract links from the service's API JSON
+        local payload
+        payload=$(
+            jq -Mc \
+                '{"serviceLinks": [
+                    (.linkedServices // [])
+                    | to_entries[]
+                    | {"name": .key, "serviceId": .value}
+                ]}' \
+                <<<"$service_json"
+        ) || return
     fi
+
+    butl.muffle_all _rnchr_pass_env_args rnchr_env_api \
+        "/services/$service_id/?action=setservicelinks" -X POST -d "$payload" || return
 }
 
 rnchr_service_has_action() {
@@ -2702,9 +2668,10 @@ rnchr_service_util_extract_service_compose() {
 
 rnchr_service_util_normalize_compose_json() {
     jq -MS "$@" '
-        .links = ((.links // []) | sort)
-        | .external_links = ((.external_links // []) | sort)
-        | .secrets = ((.secrets // []) | sort_by(.target))
+        .secrets = ((.secrets // []) | sort_by(.target))
         | .ports = ((.ports // []) | sort)
+        | .expose = ((.expose // []) | sort)
+        | del(.links)
+        | del(.external_links)
     '
 }
