@@ -1035,6 +1035,137 @@ rnchr_service_create_dns_service() {
     fi
 }
 
+rnchr_service_create_external_service() {
+    _rnchr_env_args
+    barg.arg __stack_service \
+        --required \
+        --value=STACK/NAME \
+        --desc="Service and stack names"
+    barg.arg __service_compose_json \
+        --long=service-compose-json \
+        --value=SERVICE_COMPOSE \
+        --desc="Service compose JSON"
+    barg.arg __stack_compose_json \
+        --long=stack-compose-json \
+        --value=STACK_COMPOSE \
+        --value=SERVICE \
+        --desc="Service from stack compose JSON"
+    barg.arg __no_start_on_create \
+        --long=no-start-on-create \
+        --desc="If set, service won't start on creation"
+    barg.arg __force_start_on_create \
+        --long=force-start-on-create \
+        --desc="If set, forces service to start on creation"
+    barg.arg __no_update_links \
+        --long=no-update-links \
+        --desc="If set, does not upgrade service links after deploying"
+    barg.arg __id_var \
+        --implies=__silent \
+        --value=VARIABLE \
+        --long=id-var \
+        --desc="Shell variable to store the service ID"
+    barg.arg __service_var \
+        --implies=__silent \
+        --value=VARIABLE \
+        --long=stack-var \
+        --desc="Shell variable to store the service JSON"
+    barg.arg __silent \
+        --long=silent \
+        --short=s \
+        --desc="Do not output service JSON after creation"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local __stack_service=
+    local __service_compose_json=
+    local __no_start_on_create=
+    local __force_start_on_create=
+    local __stack_compose_json=()
+    local __no_update_links=
+    local __id_var=
+    local __service_var=
+    local __silent=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    if [[ "$__stack_service" =~ \/ ]]; then
+        local _stack=${__stack_service%%\/*}
+        local _service=${__stack_service##*\/}
+    else
+        butl.fail "Name should be <STACK_NAME>/<SERVICE_NAME>"
+        return
+    fi
+
+    local _stack_id
+    _rnchr_pass_env_args rnchr_stack_get_id --id-var _stack_id "$_stack" || return
+
+    local start_on_create=true
+
+    if [[ ! "$__service_compose_json" ]] && ((${#__stack_compose_json[@]} > 0)); then
+        local stack_compose=
+        stack_compose=${__stack_compose_json[0]}
+
+        local target_service=
+        target_service=${__stack_compose_json[1]}
+
+        _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
+            "$stack_compose" "$target_service" --compose-var __service_compose_json || return
+
+        if [[ ! "$__service_compose_json" ]]; then
+            butl.fail "Compose file does not have any entry for service $target_service"
+            return
+        fi
+    fi
+
+    if [[ ! "$__service_compose_json" ]]; then
+        butl.fail "No service configuration was supplied"
+        return
+    fi
+
+    start_on_create=$(jq -Mr '.start_on_create // true' <<<"$__service_compose_json")
+
+    if ((__force_start_on_create)); then
+        start_on_create=true
+    elif ((__no_start_on_create)); then
+        start_on_create=false
+    fi
+
+    local __payload
+    __payload=$(
+        jq -Mnc \
+            --arg name "$_service" \
+            --argjson startOnCreate "$start_on_create" \
+            --arg stackId "$_stack_id" \
+            '{
+                "type": "dnsService",
+                "name": $name,
+                "stackId": $stackId,
+                "startOnCreate": $startOnCreate,
+                "assignServiceIpAddress": false,
+            }'
+    ) || return
+
+    butl.muffle_all _rnchr_pass_env_args rnchr_env_api "/dnsservice" -X POST -d "$__payload" || return
+
+    if ! ((__no_update_links)); then
+        _rnchr_pass_env_args rnchr_service_update_links "$__service_id" \
+            --service-compose-json "$__service_compose_json" || return
+    fi
+}
+
 rnchr_service_create_load_balancer() {
     _rnchr_env_args
     barg.arg __stack_service \
@@ -2356,7 +2487,7 @@ rnchr_service_util_to_lb_config() {
 
 rnchr_service_util_to_launch_config() {
     _rnchr_env_args
-    barg.arg __compose \
+    barg.arg __compose_json \
         --required \
         --value=JSON \
         --desc="Compose JSON to work with"
@@ -2374,7 +2505,7 @@ rnchr_service_util_to_launch_config() {
     # shellcheck disable=SC2034
     local rancher_env=
 
-    local __compose=
+    local __compose_json=
     local __config_var=
 
     local should_exit=
@@ -2385,9 +2516,10 @@ rnchr_service_util_to_launch_config() {
         return "$should_exit_err"
     fi
 
+    local __compose
     # shellcheck disable=2001
-    __compose=$(sed 's/\$\$/\$/g' <<<"$__compose") # faster on big strings?
-    # __compose=${__compose//\$\$/\$}
+    __compose=$(sed 's/\$\$/\$/g' <<<"$__compose_json") # faster on big strings?
+    # __compose=${__compose_json//\$\$/\$}
 
     butl.log_debug "Converting service compose to rancher launch config"
 
@@ -2405,33 +2537,7 @@ rnchr_service_util_to_launch_config() {
 
     # Health check only needs to be added IF defined
     local health_check
-    health_check=$(jq -Mc '.health_check' <<<"$__compose")
-    if [[ "$health_check" != "null" ]]; then
-        local quorum
-        quorum=$(jq -Mc '.recreate_on_quorum_strategy_config.quorum' <<<"$health_check") || return
-
-        health_check=$(jq -Mc '{
-            "type": "instanceHealthCheck",
-            "healthyThreshold": .healthy_threshold,
-            "initializingTimeout": .initializing_timeout,
-            "interval": .interval,
-            "name": null,
-            "port": .port,
-            "reinitializingTimeout": .reinitializing_timeout,
-            "requestLine": .request_line,
-            "responseTimeout": .response_timeout,
-            "strategy": .strategy,
-            "unhealthyThreshold": .unhealthy_threshold
-        }' <<<"$health_check") || return
-
-        if [[ "$quorum" && "$quorum" != "null" ]]; then
-            health_check=$(jq -Mc --argjson quorum "$quorum" \
-                '.recreateOnQuorumStrategyConfig = {
-                    "type": "recreateOnQuorumStrategyConfig",
-                    "quorum": $quorum,
-                }' <<<"$health_check") || return
-        fi
-    fi
+    rnchr_service_util_to_healthcheck_config "$__compose_json" --config-var health_check || return
 
     # Build a new json with all the info from docker-compose
     # Most of it is just converting case and making sure there
@@ -2533,6 +2639,79 @@ rnchr_service_util_to_launch_config() {
         butl.set_var "$__config_var" "$__service_launch_config"
     else
         echo "$__service_launch_config"
+    fi
+}
+
+rnchr_service_util_to_healthcheck_config() {
+    _rnchr_env_args
+    barg.arg __compose_json \
+        --required \
+        --value=JSON \
+        --desc="Compose JSON to work with"
+    barg.arg __config_var \
+        --long=config-var \
+        --value=VARIABLE \
+        --desc="Shell variable to store the config into"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local __compose_json=
+    local __config_var=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local __compose
+    # shellcheck disable=2001
+    __compose=$(sed 's/\$\$/\$/g' <<<"$__compose_json") # faster on big strings?
+    # __compose=${__compose_json//\$\$/\$}
+
+    # Health check only needs to be added IF defined
+    local __service_health_check
+    __service_health_check=$(jq -Mc '.health_check' <<<"$__compose")
+    if [[ "$__service_health_check" != "null" ]]; then
+        local quorum
+        quorum=$(jq -Mc '.recreate_on_quorum_strategy_config.quorum' <<<"$__service_health_check") || return
+
+        __service_health_check=$(jq -Mc '{
+            "type": "instanceHealthCheck",
+            "healthyThreshold": .healthy_threshold,
+            "initializingTimeout": .initializing_timeout,
+            "interval": .interval,
+            "name": null,
+            "port": .port,
+            "reinitializingTimeout": .reinitializing_timeout,
+            "requestLine": .request_line,
+            "responseTimeout": .response_timeout,
+            "strategy": .strategy,
+            "unhealthyThreshold": .unhealthy_threshold
+        }' <<<"$__service_health_check") || return
+
+        if [[ "$quorum" && "$quorum" != "null" ]]; then
+            __service_health_check=$(jq -Mc --argjson quorum "$quorum" \
+                '.recreateOnQuorumStrategyConfig = {
+                    "type": "recreateOnQuorumStrategyConfig",
+                    "quorum": $quorum,
+                }' <<<"$__service_health_check") || return
+        fi
+    fi
+
+    if [[ "$__config_var" ]]; then
+        butl.set_var "$__config_var" "$__service_health_check"
+    else
+        echo "$__service_health_check"
     fi
 }
 
