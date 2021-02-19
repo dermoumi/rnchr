@@ -917,10 +917,11 @@ rnchr_stack_make_services_upgradable() {
         return "$should_exit_err"
     fi
 
+    local stack_services
+    _rnchr_pass_env_args rnchr_stack_get_services "$stack" --services-var stack_services || return
+
     local service_count=${#services[@]}
     if ! ((service_count)); then
-        local stack_services
-        _rnchr_pass_env_args rnchr_stack_get_services "$stack" --services-var stack_services || return
 
         local services_lines
         services_lines=$(jq -Mr '.[] | .name' <<<"$stack_services") || return
@@ -932,26 +933,23 @@ rnchr_stack_make_services_upgradable() {
         butl.split_lines services "$services_lines"
     fi
 
+    butl.log_debug "Making $stack services reach an upgradable state: ${services[*]}"
+
     if ((service_count == 1)); then
         local service=${services[0]}
+        local args=("$stack/$service")
 
         if ((await)); then
-            local args="--wait"
-        else
-            local args=''
+            args+=(--wait)
         fi
 
-        # shellcheck disable=SC2086
-        _rnchr_pass_env_args rnchr_service_make_upgradable "$stack/$service" $args || return
+        _rnchr_pass_env_args rnchr_service_make_upgradable "${args[@]}" || return
     else
-        local stack_services
-        _rnchr_pass_env_args rnchr_stack_get_services "$stack" --services-var stack_services || return
+        local co_run_commands=()
 
         local services_awaiting=()
         local service
         for service in "${services[@]}"; do
-            butl.log_debug "Making $stack/$service reach an upgradable state"
-
             local service_json=
             service_json=$(jq -Mc --arg service "$service" \
                 '.[] | select(.name == $service)' <<<"$stack_services") || return
@@ -961,25 +959,20 @@ rnchr_stack_make_services_upgradable() {
                 return
             fi
 
-            local endpoint=
-            local action_endpoint=
-            for action in finishupgrade rollback; do
-                endpoint=$(jq -Mr --arg action "$action" \
-                    '.actions[$action] | select(. != null)' <<<"$service_json") || return
+            local service_id=
+            service_id=$(jq -Mr '.id' <<<"$service_json") || return
 
-                if [[ "$endpoint" ]]; then
-                    action_endpoint=$endpoint
-                    : "Service ${BUTL_ANSI_UNDERLINE}$service${BUTL_ANSI_RESET_UNDERLINE}"
-                    butl.log_debug "$_ pending $action..."
-                    break
-                fi
-            done
-
-            if [[ "$action_endpoint" ]]; then
-                butl.muffle_all rnchr_env_api "$action_endpoint" -X POST || return
-                services_awaiting+=("$service")
-            fi
+            co_run_commands+=(
+                "$(printf -- '%q ' _rnchr_pass_env_args rnchr_service_make_upgradable "$service_id" \
+                    --use-service "$service_json")"
+            )
         done
+
+        if ! ((${#co_run_commands[@]})); then
+            return
+        fi
+
+        butl.co_run "" "${co_run_commands[@]}" || return
 
         if ((${#services_awaiting[@]})) && ((await)); then
             _rnchr_pass_env_args rnchr_stack_wait_for_service_action \
@@ -1065,6 +1058,98 @@ rnchr_stack_remove_non_upgradable_services() {
         for service_id in "${non_upgradable_services[@]}"; do
             _rnchr_pass_env_args rnchr_service_wait_for_containers_to_stop "$service_id" || continue
         done
+    fi
+}
+
+rnchr_stack_finish_upgrade() {
+    _rnchr_env_args
+    barg.arg stack \
+        --required \
+        --value=STACK \
+        --desc="Stack name"
+    barg.arg services \
+        --multi \
+        --value=SERVICE \
+        --desc="Service to watch for"
+    barg.arg await \
+        --short=w \
+        --long=wait \
+        --desc="Wait for service to be in an upgradable state"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local stack=
+    local services=()
+    local await=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local stack_id=
+    _rnchr_pass_env_args rnchr_stack_get_id "$stack" --id-var stack_id || return
+
+    local stack_services
+    _rnchr_pass_env_args rnchr_stack_get_services "$stack_id" --services-var stack_services || return
+
+    local service_count=${#services[@]}
+    if ! ((service_count)); then
+        local services_lines
+        services_lines=$(jq -Mr '.[] | .name' <<<"$stack_services") || return
+
+        if [[ ! "$services_lines" ]]; then
+            return
+        fi
+
+        butl.split_lines services "$services_lines"
+    fi
+
+    butl.log_debug "Making $stack services reach an upgradable state: ${services[*]}"
+
+    if ((service_count == 1)); then
+        local service=${services[0]}
+        local args=("$stack_id/$service" --use-service-list "$stack_services")
+        echo "$stack_id/$service" >&2
+
+        if ((await)); then
+            args+=(--wait)
+        fi
+
+        _rnchr_pass_env_args rnchr_service_finish_upgrade "${args[@]}" || return
+    else
+        local co_run_commands=()
+
+        local service
+        for service in "${services[@]}"; do
+            local args=(
+                "\"\$stack_id/$service\""
+                --use-service-list
+                "\"\$stack_services\""
+            )
+
+            if ((await)); then
+                args+=(--wait)
+            fi
+
+            co_run_commands+=("_rnchr_pass_env_args rnchr_service_finish_upgrade ${args[*]}")
+        done
+
+        if ! ((${#co_run_commands[@]})); then
+            return
+        fi
+
+        butl.co_run "" "${co_run_commands[@]}" || return
     fi
 }
 
@@ -1330,6 +1415,11 @@ rnchr_stack_up() {
         --value=SECONDS \
         --desc="Finishes upgrade but fails if exceeds given time"
 
+    barg.arg await \
+        --long=wait \
+        --short=w \
+        --desc="Wait until all operations have finished"
+
     # shellcheck disable=SC2034
     local rancher_url=
     # shellcheck disable=SC2034
@@ -1351,6 +1441,8 @@ rnchr_stack_up() {
     local no_update_links=
     local no_finish_upgrade=
     local finish_upgrade_timeout=
+
+    local await=
 
     local should_exit=
     local should_exit_err=0
@@ -1377,10 +1469,17 @@ rnchr_stack_up() {
     local recreate_services=()
 
     local stack_service_lines
-    stack_service_lines=$(jq -Mr '.services | to_entries[] | .key' <<<"$compose_json") || return
+    stack_service_lines=$(jq -Mr '.services | keys[]' <<<"$compose_json") || return
 
-    local compose_services
-    butl.split_lines compose_services "${stack_service_lines[@]}"
+    local all_compose_services=()
+    butl.split_lines all_compose_services "${stack_service_lines[@]}"
+
+    local compose_services=()
+    for service in "${all_compose_services[@]}"; do
+        if ! ((${#services[@]})) || [[ " ${services[*]} " == *" $service "* ]]; then
+            compose_services+=("$service")
+        fi
+    done
 
     if _rnchr_pass_env_args rnchr_stack_exists "$stack" --id-var stack_id --stack-var stack_json; then
         if ((upgrade)) && ((${#meta_args[@]})); then
@@ -1398,46 +1497,44 @@ rnchr_stack_up() {
 
             if [[ ! "$remote_service_compose" ]]; then
                 create_services+=("$service")
-            elif ! ((${#services[@]})) || [[ " ${services[*]} " == *" $service "* ]]; then
-                if ((upgrade)); then
-                    local service_compose
-                    _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
-                        "$compose_json" "$service" --compose-var service_compose || return
+            elif ((upgrade)); then
+                local service_compose
+                _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
+                    "$compose_json" "$service" --compose-var service_compose || return
 
-                    local remote_is_builtin_service=0
-                    local remote_image=
-                    local remote_cmp_compose=
-                    remote_cmp_compose=$(
-                        rnchr_service_util_normalize_compose_json \
-                            remote_is_builtin_service \
-                            remote_image \
-                            <<<"$remote_service_compose"
-                    ) || return
+                local remote_is_builtin_service=0
+                local remote_image=
+                local remote_cmp_compose=
+                remote_cmp_compose=$(
+                    rnchr_service_util_normalize_compose_json \
+                        remote_is_builtin_service \
+                        remote_image \
+                        <<<"$remote_service_compose"
+                ) || return
 
-                    local is_builtin_service=0
-                    local service_image=
-                    local service_cmp_compose=
-                    service_cmp_compose=$(
-                        rnchr_service_util_normalize_compose_json \
-                            is_builtin_service \
-                            service_image \
-                            <<<"$service_compose"
-                    ) || return
+                local is_builtin_service=0
+                local service_image=
+                local service_cmp_compose=
+                service_cmp_compose=$(
+                    rnchr_service_util_normalize_compose_json \
+                        is_builtin_service \
+                        service_image \
+                        <<<"$service_compose"
+                ) || return
 
-                    if [[ "$remote_image" != "$service_image" ]] \
-                        && ((remote_is_builtin_service || is_builtin_service)); then
-                        recreate_services+=("$service")
-                    elif ((force_upgrade)); then
-                        upgrade_services+=("$service")
-                    elif ! cmp <(echo "$remote_cmp_compose") <(echo "$service_cmp_compose") >/dev/null; then
-                        upgrade_services+=("$service")
+                if [[ "$remote_image" != "$service_image" ]] \
+                    && ((remote_is_builtin_service || is_builtin_service)); then
+                    recreate_services+=("$service")
+                elif ((force_upgrade)); then
+                    upgrade_services+=("$service")
+                elif ! cmp <(echo "$remote_cmp_compose") <(echo "$service_cmp_compose") >/dev/null; then
+                    upgrade_services+=("$service")
 
-                        if ((${LOG_LEVEL:-5} >= 7)); then
-                            butl.log_debug "Adding $service to upgrade queue:"
-                            butl.log_debug "$(
-                                diff <(echo "$remote_cmp_compose") <(echo "$service_cmp_compose")
-                            )" || true
-                        fi
+                    if ((${LOG_LEVEL:-5} >= 7)); then
+                        butl.log_debug "Adding $service to upgrade queue:"
+                        butl.log_debug "$(
+                            diff <(echo "$remote_cmp_compose") <(echo "$service_cmp_compose")
+                        )" || true
                     fi
                 fi
             fi
@@ -1446,7 +1543,7 @@ rnchr_stack_up() {
         _rnchr_pass_env_args rnchr_stack_create "$stack" "${meta_args[@]}" \
             --id-var stack_id --stack-var stack_json || return
 
-        create_services=("${compose_services[@]}")
+        create_services+=("${compose_services[@]}")
     fi
 
     # shellcheck disable=SC2034
@@ -1461,19 +1558,18 @@ rnchr_stack_up() {
         done
     fi
 
+    if ((${#create_services[@]} + ${#recreate_services[@]} + ${#upgrade_services[@]})); then
+        local secrets_json=
+        _rnchr_pass_env_args rnchr_secret_list --secrets-var secrets_json || return
+    fi
+
     if ! ((no_create)) && ((${#create_services[@]} + ${#recreate_services[@]})); then
         butl.log_info "Creating services: ${create_services[*]}..."
 
         for service in "${create_services[@]}" "${recreate_services[@]}"; do
-            local service_compose
-            _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
-                "$compose_json" "$service" --compose-var service_compose || return
-
-            local service_image
-            service_image=$(jq -Mr '.image' <<<"$service_compose") || return
-
             _rnchr_pass_env_args rnchr_service_create "$stack_id/$service" --silent \
-                --service-compose-json "$service_compose" --no-update-links || return
+                --stack-compose-json "$compose_json" "$service" --no-update-links \
+                --use-secret-list "$secrets_json" || return
         done
     fi
 
@@ -1498,21 +1594,17 @@ rnchr_stack_up() {
                 return
             fi
 
+            _rnchr_pass_env_args rnchr_service_upgrade "$service_id" \
+                --stack-compose-json "$compose_json" "$service" \
+                --use-service "$service_json" --no-update-links \
+                --use-secret-list "$secrets_json" || return
+
             upgraded_service_ids+=("$service_id")
-
-            local service_compose
-            _rnchr_pass_env_args rnchr_service_util_extract_service_compose \
-                "$compose_json" "$service" --compose-var service_compose || return
-
-            _rnchr_pass_env_args rnchr_service_make_upgradable "$stack_id/$service_id" --wait || return
-
-            _rnchr_pass_env_args rnchr_service_upgrade "$stack_id/$service_id" \
-                --service-compose-json "$service_compose" --use-service "$service_json" --no-update-links || return
         done
     fi
 
     # Update service links
-    if ! ((no_update_links)) && ((${#recreate_services[@]} + ${#create_services[@]} + ${#upgrade_services[@]})); then
+    if ! ((no_update_links)) && ((${#compose_services[@]})); then
         butl.log_info "Setting service links..."
 
         local remote_services
@@ -1524,56 +1616,58 @@ rnchr_stack_up() {
             "_rnchr_pass_env_args rnchr_stack_list" \
             "_rnchr_pass_env_args rnchr_service_list" || return
 
+        # shellcheck disable=SC2034
         local stacks_list=${json_map[0]}
+        # shellcheck disable=SC2034
         local services_list=${json_map[1]}
 
-        for service in "${recreate_services[@]}" "${create_services[@]}" "${upgrade_services[@]}"; do
+        local co_run_commands=()
+        for service in "${compose_services[@]}"; do
             if [[ ! "$service" ]]; then
                 continue
             fi
 
-            local service_id
-            service_id=$(jq -Mr --arg service "$service" \
-                '.[] | select(.name == $service) | .id' <<<"$remote_services") || return
+            : "_rnchr_pass_env_args rnchr_service_update_links \"\$stack_id/$service\""
+            : "$_ --stack-compose-json \"\$compose_json\" \"$service\""
+            local cmd="$_ --use-stack-list \"\$stacks_list\" --use-service-list \"\$services_list\""
 
-            if [[ ! "$service_id" ]]; then
-                butl.log_warning "Service $stack/$service was not deployed correctly"
-                continue
-            fi
-
-            local service_compose
-            service_compose=$(jq -Mc --arg service "$service" \
-                '.services[$service] | select(. != null)' <<<"$compose_json") || return
-
-            if [[ ! "$service_compose" ]]; then
-                continue
-            fi
-
-            _rnchr_pass_env_args rnchr_service_update_links "$service_id" \
-                --service-compose-json "$service_compose" \
-                --use-stack-list "$stacks_list" --use-service-list "$services_list" || return
+            co_run_commands+=("$cmd")
         done
+
+        butl.co_run "" "${co_run_commands[@]}" || return
     fi
 
-    # Finish upgrade
-    if ((upgrade)) && ! ((no_finish_upgrade)) && ((${#upgrade_services[@]})); then
+    if ! ((no_finish_upgrade)) && { ((upgrade)) || ! ((no_create)); }; then
         butl.log_info "Finishing upgrade..."
 
-        for service_id in "${upgraded_service_ids[@]}"; do
-            _rnchr_pass_env_args rnchr_service_finish_upgrade "$service_id" \
-                --timeout "$finish_upgrade_timeout" || return
-        done
-    fi
+        local args=("$stack_id")
+        if ((await)); then
+            args+=(--wait)
+        fi
 
-    if ! ((no_create)) && ((${#create_services[@]} + ${#recreate_services[@]})); then
-        butl.log_info "Waiting for all services to become upgradable again..."
-        for service in "${recreate_services[@]}" "${create_services[@]}"; do
-            _rnchr_pass_env_args rnchr_service_make_upgradable "$stack_id/$service" || continue
-        done
+        _rnchr_pass_env_args rnchr_stack_finish_upgrade "${args[@]}"
     fi
 
     # Ensure that secrets are mounted
     butl.log_info "Ensuring secrets are mounted when applicable..."
     _rnchr_pass_env_args rnchr_stack_ensure_secrets_mounted "$stack" \
         --finish-upgrade-timeout="$finish_upgrade_timeout"
+}
+
+rnchr_stack_util_build_dependency_arrays() {
+    local stack_compose=$1
+    local arrays_var=$2
+    shift
+
+    local services
+    if (($#)); then
+        services=("$@")
+    else
+        local service_lines=
+        service_lines=$(jq -Mr '.services | keys[]' <<<"$stack_compose")
+
+        butl.split_lines services "$service_lines"
+    fi
+
+    printf -- '%s\n' "${services[@]}"
 }

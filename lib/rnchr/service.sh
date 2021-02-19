@@ -728,6 +728,10 @@ rnchr_service_create() {
         --long=silent \
         --short=s \
         --desc="Do not output service JSON after creation"
+    barg.arg _use_secret_list \
+        --hidden \
+        --long=use-secret-list \
+        --value=JSON
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -748,6 +752,7 @@ rnchr_service_create() {
     local __id_var=
     local __service_var=
     local __silent=
+    local _use_secret_list=
 
     local should_exit=
     local should_exit_err=0
@@ -842,7 +847,7 @@ rnchr_service_create() {
     fi
 
     _rnchr_pass_env_args rnchr_service_util_to_launch_config "$__service_compose_json" \
-        --config-var __launch_config || return
+        --config-var __launch_config --use-secret-list "$_use_secret_list" || return
 
     scale=$(jq -Mr '.scale // 1' <<<"$__service_compose_json")
     start_on_create=$(jq -Mr '.start_on_create // true' <<<"$__service_compose_json")
@@ -1392,6 +1397,10 @@ rnchr_service_upgrade() {
         --hidden \
         --long=use-service \
         --value=JSON
+    barg.arg _use_secret_list \
+        --hidden \
+        --long=use-secret-list \
+        --value=JSON
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -1415,6 +1424,7 @@ rnchr_service_upgrade() {
     local ensure_secrets=
     local _use_payload=
     local _use_service=
+    local _use_secret_list=
 
     local should_exit=
     local should_exit_err=0
@@ -1431,6 +1441,8 @@ rnchr_service_upgrade() {
 
     local service_id
     service_id=$(jq -Mr '.id' <<<"$service_json") || return
+
+    _rnchr_pass_env_args rnchr_service_make_upgradable "$service_id" --use-service "$service_json" --wait || return
 
     local payload
     if [[ "$_use_payload" ]]; then
@@ -1519,7 +1531,7 @@ rnchr_service_upgrade() {
 
         if [[ "$service_compose_json" ]]; then
             _rnchr_pass_env_args rnchr_service_util_to_launch_config "$service_compose_json" \
-                --config-var launch_config || return
+                --config-var launch_config --use-secret-list "$_use_secret_list" || return
 
             batch_size=$(jq -Mr '.upgrade_strategy.batch_size // 1' <<<"$service_compose_json") || return
             interval_millis=$(jq -Mr '.upgrade_strategy.interval_millis // 2000' <<<"$service_compose_json") || return
@@ -1913,6 +1925,14 @@ rnchr_service_finish_upgrade() {
         --long=timeout \
         --value=SECONDS \
         --desc="Finishes upgrade but fails if exceeds given time"
+    barg.arg _use_service \
+        --hidden \
+        --long=use-service \
+        --value=JSON
+    barg.arg _use_service_list \
+        --hidden \
+        --long=use-service-list \
+        --value=JSON
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -1925,6 +1945,8 @@ rnchr_service_finish_upgrade() {
 
     local stack_service=
     local timeout=
+    local _use_service=
+    local _use_service_list=
 
     local should_exit=
     local should_exit_err=0
@@ -1934,10 +1956,16 @@ rnchr_service_finish_upgrade() {
         return "$should_exit_err"
     fi
 
-    local service_id
-    _rnchr_pass_env_args rnchr_service_get_id --id-var service_id "$stack_service" || return
+    local service_json=$_use_service
+    if [[ ! "$service_json" ]]; then
+        _rnchr_pass_env_args rnchr_service_get "$stack_service" \
+            --service-var service_json --use-service-list "$_use_service_list" || return
+    fi
 
-    if _rnchr_pass_env_args rnchr_service_has_action "$service_id" upgrade; then
+    local service_id
+    service_id=$(jq -Mr '.id' <<<"$service_json") || return
+
+    if _rnchr_pass_env_args rnchr_service_has_action "$service_id" --use-service "$service_json" upgrade; then
         return
     fi
 
@@ -2197,6 +2225,10 @@ rnchr_service_has_action() {
         --required \
         --value=ACTION \
         --desc="Action to wait for for"
+    barg.arg _use_service \
+        --hidden \
+        --long=use-service \
+        --value=JSON
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -2209,6 +2241,7 @@ rnchr_service_has_action() {
 
     local service=
     local action=
+    local _use_service=
 
     local should_exit=
     local should_exit_err=0
@@ -2218,8 +2251,10 @@ rnchr_service_has_action() {
         return "$should_exit_err"
     fi
 
-    local service_json=
-    _rnchr_pass_env_args rnchr_service_get --service-var service_json "$service" || return
+    local service_json=$_use_service
+    if [[ ! "$service_json" ]]; then
+        _rnchr_pass_env_args rnchr_service_get --service-var service_json "$service" || return
+    fi
 
     local endpoint=
     endpoint=$(jq -Mr --arg action "$action" \
@@ -2280,6 +2315,10 @@ rnchr_service_make_upgradable() {
         --short=w \
         --long=wait \
         --desc="Wait for service to be in an upgradable state"
+    barg.arg _use_service \
+        --hidden \
+        --long=use-service \
+        --value=JSON
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -2292,6 +2331,7 @@ rnchr_service_make_upgradable() {
 
     local service=
     local await=
+    local _use_service=
 
     local should_exit=
     local should_exit_err=0
@@ -2303,8 +2343,10 @@ rnchr_service_make_upgradable() {
 
     butl.log_debug "Making Service $service reach an upgradable state"
 
-    local service_json=
-    _rnchr_pass_env_args rnchr_service_get --service-var service_json "$service" || return
+    local service_json=$_use_service
+    if [[ ! "$service_json" ]]; then
+        _rnchr_pass_env_args rnchr_service_get --service-var service_json "$service" || return
+    fi
 
     local endpoint=
     local action_endpoint=
@@ -2634,6 +2676,10 @@ rnchr_service_util_to_launch_config() {
         --long=config-var \
         --value=VARIABLE \
         --desc="Shell variable to store the config into"
+    barg.arg _use_secret_list \
+        --hidden \
+        --long=use-secret-list \
+        --value=JSON
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -2646,6 +2692,7 @@ rnchr_service_util_to_launch_config() {
 
     local __compose_json=
     local __config_var=
+    local _use_secret_list=
 
     local should_exit=
     local should_exit_err=0
@@ -2664,7 +2711,8 @@ rnchr_service_util_to_launch_config() {
 
     # Need to reference secrets by their IDs, so we fetch all of them from rancher and match
     local secrets=
-    _rnchr_pass_env_args rnchr_service_util_reference_secrets "$__compose" --secrets-var secrets || return
+    _rnchr_pass_env_args rnchr_service_util_reference_secrets "$__compose" \
+        --secrets-var secrets --use-secret-list "$_use_secret_list" || return
 
     # Some extra values from rancher-compose
     local milli_cpu_reservation
@@ -2864,6 +2912,10 @@ rnchr_service_util_reference_secrets() {
         --long=secrets-var \
         --value=VARIABLE \
         --desc="Shell variable to store the secrets array into"
+    barg.arg _use_secret_list \
+        --hidden \
+        --long=use-secret-list \
+        --value=JSON
 
     # shellcheck disable=SC2034
     local rancher_url=
@@ -2876,6 +2928,7 @@ rnchr_service_util_reference_secrets() {
 
     local __compose=
     local __secrets_var=
+    local _use_secret_list=
 
     local should_exit=
     local should_exit_err=0
@@ -2894,8 +2947,10 @@ rnchr_service_util_reference_secrets() {
     if ((${#referenced_secrets[@]})); then
         butl.log_debug "Dereferencing secrets"
 
-        local secrets_json
-        _rnchr_pass_env_args rnchr_secret_list --secrets-var secrets_json || return
+        local secrets_json=$_use_secret_list
+        if [[ ! "$secrets_json" ]]; then
+            _rnchr_pass_env_args rnchr_secret_list --secrets-var secrets_json || return
+        fi
 
         local secret
         for secret in "${referenced_secrets[@]}"; do
