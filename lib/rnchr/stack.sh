@@ -1120,7 +1120,6 @@ rnchr_stack_finish_upgrade() {
     if ((service_count == 1)); then
         local service=${services[0]}
         local args=("$stack_id/$service" --use-service-list "$stack_services")
-        echo "$stack_id/$service" >&2
 
         if ((await)); then
             args+=(--wait)
@@ -1311,6 +1310,7 @@ rnchr_stack_ensure_secrets_mounted() {
 
     local services_with_secrets=()
     butl.split_lines services_with_secrets "$(jq -Mrc '.services | to_entries[]
+        | select(.value.labels["io.rancher.container.start_once"] != "true")
         | select(.value.secrets | length > 0) | .key' <<<"$compose_json")" || return
 
     local concerned_services=()
@@ -1392,7 +1392,6 @@ rnchr_stack_up() {
         --long=tags \
         --short=t \
         --desc="Comma separated tags to set for the stack"
-
     barg.arg services \
         --multi \
         --value=SERVICE \
@@ -1789,7 +1788,6 @@ rnchr_stack_util_build_dependency_arrays_helper() {
                 if [[ " $* " == *" $link_service "* ]] \
                     && [[ " ${dependencies[*]} " != *" $link_service "* ]] \
                     && [[ " ${processed_services[*]} " != *" $link_service "* ]]; then
-                    echo "DEP $link_service" >&2
                     dependencies+=("$link_service")
                 fi
             done
@@ -1806,7 +1804,6 @@ rnchr_stack_util_build_dependency_arrays_helper() {
                 result+=("${dependencies[*]}")
                 processed_services+=("${dependencies[@]}")
 
-                echo "RINSE AND REPEAT" >&2
                 rnchr_stack_util_build_dependency_arrays_helper "${dependants[@]}"
             fi
         else

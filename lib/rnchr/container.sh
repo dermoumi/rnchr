@@ -11,7 +11,7 @@ rnchr_container_get() {
         --value=CONTAINER \
         --desc="Container to get the ID of"
     barg.arg container_var \
-        --long=id-var \
+        --long=container-var \
         --value=variable \
         --desc="Set the shell variable instead"
 
@@ -57,7 +57,7 @@ rnchr_container_get() {
     fi
 
     if [[ "$__container_json" ]]; then
-        if [[ "$id_var" ]]; then
+        if [[ "$container_var" ]]; then
             butl.set_var "$container_var" "$__container_json"
         else
             echo "$__container_json"
@@ -288,6 +288,8 @@ rnchr_container_logs() {
         timestamps=$(jq -Mc '.timestamps = true' <<<"$payload") || return
     fi
 
+    _rnchr_pass_env_args rnchr_container_wait_for_action "$container" logs || return
+
     local response=
     _rnchr_pass_env_args rnchr_env_api \
         --response-var response \
@@ -425,4 +427,95 @@ rnchr_container_exec() {
     else
         return "$rc"
     fi
+}
+
+rnchr_container_wait_for_action() {
+    _rnchr_env_args
+    barg.arg container \
+        --required \
+        --value=CONTAINER \
+        --desc="Container ID or <STACK>/<NAME>"
+    barg.arg action \
+        --required \
+        --value=ACTION \
+        --desc="Action to wait for for"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local container=
+    local action=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    butl.log_debug "Waiting for container $container to have action $action"
+
+    local container_id=
+    _rnchr_pass_env_args rnchr_container_get_id \
+        --id-var container_id "$container" || return
+
+    while ! _rnchr_pass_env_args rnchr_container_has_action "$container_id" "$action"; do
+        # Wait for 1 seconds before trying again
+        sleep 1
+    done
+}
+
+rnchr_container_has_action() {
+    _rnchr_env_args
+    barg.arg container \
+        --required \
+        --value=CONTAINER \
+        --desc="Container ID or <STACK>/<NAME>"
+    barg.arg action \
+        --required \
+        --value=ACTION \
+        --desc="Action to wait for for"
+    barg.arg _use_container \
+        --hidden \
+        --long=use-container \
+        --value=JSON
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local container=
+    local action=
+    local _use_container=
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    local container_json=$_use_container
+    if [[ ! "$container_json" ]]; then
+        _rnchr_pass_env_args rnchr_container_get --container-var container_json "$container" || return
+    fi
+
+    local endpoint=
+    endpoint=$(jq -Mr --arg action "$action" \
+        '.actions[$action] | select(. != null)' <<<"$container_json") || return
+
+    [[ "$endpoint" ]]
 }

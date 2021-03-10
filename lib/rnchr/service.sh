@@ -663,7 +663,6 @@ rnchr_service_logs() {
                 local col_container="${container_colors[$col_index]}"
             fi
 
-            # Putting the whole subshell in an eval to avoid shfmt breaking it when minifying
             while read -r line; do
                 if [[ "${line::2}" == "01" ]]; then
                     printf "%b%-10s %b%s%b\n" "$col_container" "$container_id" \
@@ -2031,6 +2030,53 @@ rnchr_service_finish_upgrade() {
     _rnchr_pass_env_args rnchr_service_make_upgradable "$service_id" || return
 }
 
+rnchr_service_update_alias() {
+    _rnchr_env_args
+    barg.arg stack_service \
+        --required \
+        --value=STACK/NAME \
+        --desc="Alias Service"
+    barg.arg services \
+        --multi \
+        --value=SERVICE \
+        --desc="Service to upgrade if already exist"
+
+    # shellcheck disable=SC2034
+    local rancher_url=
+    # shellcheck disable=SC2034
+    local rancher_access_key=
+    # shellcheck disable=SC2034
+    local rancher_secret_key=
+    # shellcheck disable=SC2034
+    local rancher_env=
+
+    local stack_service=
+    local services=()
+
+    local should_exit=
+    local should_exit_err=0
+    barg.parse "$@"
+    # barg.parse requested an exit
+    if ((should_exit)); then
+        return "$should_exit_err"
+    fi
+
+    if ! ((${#services[@]})); then
+        return
+    fi
+
+    local alias_json='{"links": []}'
+
+    local service
+    for service in "${services[@]}"; do
+        local name=${service##*/}
+        alias_json=$(jq -Mr --arg service "$service" --arg name "$name" \
+            '.links += [$service + ":" + $name]' <<<"$alias_json") || return
+    done
+
+    rnchr_service_update_links "$stack_service" --service-compose-json "$alias_json"
+}
+
 rnchr_service_update_links() {
     _rnchr_env_args
     barg.arg stack_service \
@@ -2173,12 +2219,14 @@ rnchr_service_update_links() {
         service_id=$(jq -Mr '.id' <<<"$service_json") || return
     fi
 
+    # Make sure we can set service links in this service
     local has_action
     has_action=$(jq -Mr '.actions.setservicelinks | select(. != null)' <<<"$service_json") || return
     if [[ ! "$has_action" ]]; then
         return
     fi
 
+    # Extract the service compose out of the stack compose
     if [[ ! "$service_compose_json" ]] && ((${#stack_compose_json[@]} > 0)); then
         local stack_compose=
         stack_compose=${stack_compose_json[0]}
@@ -3099,7 +3147,13 @@ rnchr_service_util_normalize_compose_json() {
         | .expose = ((.expose // []) | sort)
         | del(.links)
         | del(.external_links)
+        | del(.upgrade_strategy)
+        | del(.start_on_create)
     ') || return
+
+    if [[ "$(jq -Mr 'select(.environment == {})' <<<"$json")" ]]; then
+        json=$(jq -MS "$@" 'del(.environment)' <<<"$json")
+    fi
 
     local __service_image
     __service_image=$(jq -Mr '.image' <<<"$json") || return
