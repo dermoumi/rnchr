@@ -1805,11 +1805,13 @@ rnchr_stack_util_build_dependency_arrays_helper() {
                 processed_services+=("${dependencies[@]}")
 
                 rnchr_stack_util_build_dependency_arrays_helper "${dependants[@]}"
+            else
+                result+=("${dependants[*]}")
+                processed_services+=("${dependencies[@]}")
             fi
         else
             result+=("$*")
             processed_services+=("$@")
         fi
     fi
-
 }
